@@ -1,4 +1,4 @@
-//! AgentScope for Rust.
+//! `AgentScope` for Rust.
 //!
 //! The public API is intentionally empty while the project scope and
 //! compatibility goals are being designed.

@@ -1,5 +1,7 @@
 # AgentScope Rust
 
+[![CI](https://github.com/logicwu0/agentscope-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/logicwu0/agentscope-rust/actions/workflows/ci.yml)
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 一个受 [AgentScope](https://github.com/agentscope-ai/agentscope) 启发、由社区驱动的
@@ -57,7 +59,7 @@ let reply = agent
 - [x] 采用 Apache-2.0 许可证
 - [x] 配置 Rust 2024、rustfmt 和 Clippy
 - [x] 初始代码库禁止使用 unsafe Rust
-- [ ] 添加格式检查、Lint 和测试的持续集成
+- [x] 添加格式检查、Lint 和测试的持续集成
 - [ ] 添加贡献指南和安全策略
 
 ### 里程碑 1——核心类型

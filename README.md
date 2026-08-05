@@ -1,5 +1,7 @@
 # AgentScope Rust
 
+[![CI](https://github.com/logicwu0/agentscope-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/logicwu0/agentscope-rust/actions/workflows/ci.yml)
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 A community-driven, Rust-native agent framework inspired by
@@ -60,7 +62,7 @@ after they have been exercised by working examples.
 - [x] Adopt the Apache-2.0 license
 - [x] Configure Rust 2024, rustfmt, and Clippy
 - [x] Forbid unsafe Rust in the initial codebase
-- [ ] Add continuous integration for formatting, linting, and tests
+- [x] Add continuous integration for formatting, linting, and tests
 - [ ] Add contribution and security guidelines
 
 ### Milestone 1 — Core Types
@@ -140,4 +142,3 @@ please open an issue before starting a large change.
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
-
