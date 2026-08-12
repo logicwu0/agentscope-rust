@@ -2,9 +2,11 @@
 
 use std::fmt;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Local;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Map, Value};
+use url::Url;
 use uuid::Uuid;
 
 /// Arbitrary JSON metadata attached to a message.
@@ -46,7 +48,7 @@ pub struct TextBlock {
 }
 
 impl TextBlock {
-    /// Creates a completed text block.
+    /// Creates a text block.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
         let created_at = generate_timestamp();
@@ -55,6 +57,224 @@ impl TextBlock {
             id: generate_id(),
             finished_at: None,
             created_at,
+        }
+    }
+}
+
+/// An error returned when constructing or decoding a data block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataBlockError {
+    /// The media type was empty or contained only whitespace.
+    EmptyMediaType,
+    /// The provided Base64 data was malformed.
+    InvalidBase64(base64::DecodeError),
+    /// The provided URL was malformed or relative.
+    InvalidUrl(url::ParseError),
+}
+
+impl fmt::Display for DataBlockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyMediaType => formatter.write_str("media type cannot be empty"),
+            Self::InvalidBase64(error) => write!(formatter, "invalid Base64 data: {error}"),
+            Self::InvalidUrl(error) => write!(formatter, "invalid URL: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DataBlockError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::EmptyMediaType => None,
+            Self::InvalidBase64(error) => Some(error),
+            Self::InvalidUrl(error) => Some(error),
+        }
+    }
+}
+
+/// Inline Base64-encoded binary data.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Base64Source {
+    /// The Base64-encoded payload.
+    data: String,
+    /// The payload's media type, such as `image/png`.
+    media_type: String,
+}
+
+impl Base64Source {
+    /// Creates a validated Base64 source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataBlockError::InvalidBase64`] when `data` is malformed,
+    /// or [`DataBlockError::EmptyMediaType`] when `media_type` is blank.
+    pub fn new(
+        data: impl Into<String>,
+        media_type: impl Into<String>,
+    ) -> Result<Self, DataBlockError> {
+        let data = data.into();
+        STANDARD
+            .decode(&data)
+            .map_err(DataBlockError::InvalidBase64)?;
+
+        Ok(Self {
+            data,
+            media_type: validate_media_type(media_type.into())?,
+        })
+    }
+
+    /// Returns the Base64-encoded payload.
+    #[must_use]
+    pub fn data(&self) -> &str {
+        &self.data
+    }
+
+    /// Returns the payload's media type.
+    #[must_use]
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+}
+
+impl<'de> Deserialize<'de> for Base64Source {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireSource {
+            data: String,
+            media_type: String,
+        }
+
+        let source = WireSource::deserialize(deserializer)?;
+        Self::new(source.data, source.media_type).map_err(de::Error::custom)
+    }
+}
+
+/// Binary data addressed by an absolute URL.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UrlSource {
+    /// The absolute data URL.
+    url: Url,
+    /// The payload's media type, such as `audio/mpeg`.
+    media_type: String,
+}
+
+impl UrlSource {
+    /// Creates a validated URL source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataBlockError::InvalidUrl`] when `url` is not an absolute
+    /// URL, or [`DataBlockError::EmptyMediaType`] when `media_type` is blank.
+    pub fn new(
+        url: impl AsRef<str>,
+        media_type: impl Into<String>,
+    ) -> Result<Self, DataBlockError> {
+        Ok(Self {
+            url: Url::parse(url.as_ref()).map_err(DataBlockError::InvalidUrl)?,
+            media_type: validate_media_type(media_type.into())?,
+        })
+    }
+
+    /// Returns the absolute data URL.
+    #[must_use]
+    pub const fn url(&self) -> &Url {
+        &self.url
+    }
+
+    /// Returns the payload's media type.
+    #[must_use]
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+}
+
+impl<'de> Deserialize<'de> for UrlSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireSource {
+            url: String,
+            media_type: String,
+        }
+
+        let source = WireSource::deserialize(deserializer)?;
+        Self::new(source.url, source.media_type).map_err(de::Error::custom)
+    }
+}
+
+/// The source of a binary data block.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum DataSource {
+    /// Inline Base64-encoded data.
+    Base64(Base64Source),
+    /// Data available at an absolute URL.
+    Url(UrlSource),
+}
+
+/// A binary or multimodal message content block.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DataBlock {
+    /// The unique block identifier.
+    pub id: String,
+    /// The source of the block's binary data.
+    pub source: DataSource,
+    /// An optional file or display name.
+    pub name: Option<String>,
+    /// The local creation time in ISO 8601 format.
+    pub created_at: String,
+    /// The completion time for streamed content, when available.
+    pub finished_at: Option<String>,
+}
+
+impl DataBlock {
+    /// Creates a block containing inline Base64-encoded data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataBlockError::InvalidBase64`] when `data` is malformed,
+    /// or [`DataBlockError::EmptyMediaType`] when `media_type` is blank.
+    pub fn base64(
+        data: impl Into<String>,
+        media_type: impl Into<String>,
+    ) -> Result<Self, DataBlockError> {
+        Ok(Self::new(DataSource::Base64(Base64Source::new(
+            data, media_type,
+        )?)))
+    }
+
+    /// Creates a block referring to data at an absolute URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataBlockError::InvalidUrl`] when `url` is not an absolute
+    /// URL, or [`DataBlockError::EmptyMediaType`] when `media_type` is blank.
+    pub fn url(
+        url: impl AsRef<str>,
+        media_type: impl Into<String>,
+    ) -> Result<Self, DataBlockError> {
+        Ok(Self::new(DataSource::Url(UrlSource::new(url, media_type)?)))
+    }
+
+    /// Assigns a file or display name to this block.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    fn new(source: DataSource) -> Self {
+        Self {
+            id: generate_id(),
+            source,
+            name: None,
+            created_at: generate_timestamp(),
+            finished_at: None,
         }
     }
 }
@@ -68,6 +288,8 @@ impl TextBlock {
 pub enum ContentBlock {
     /// Plain-text content.
     Text(TextBlock),
+    /// Binary or multimodal data.
+    Data(DataBlock),
 }
 
 impl ContentBlock {
@@ -76,6 +298,7 @@ impl ContentBlock {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(block) => Some(block.text.as_str()),
+            Self::Data(_) => None,
         }
     }
 }
@@ -83,6 +306,12 @@ impl ContentBlock {
 impl From<TextBlock> for ContentBlock {
     fn from(block: TextBlock) -> Self {
         Self::Text(block)
+    }
+}
+
+impl From<DataBlock> for ContentBlock {
+    fn from(block: DataBlock) -> Self {
+        Self::Data(block)
     }
 }
 
@@ -187,11 +416,19 @@ fn generate_timestamp() -> String {
         .to_string()
 }
 
+fn validate_media_type(media_type: String) -> Result<String, DataBlockError> {
+    if media_type.trim().is_empty() {
+        Err(DataBlockError::EmptyMediaType)
+    } else {
+        Ok(media_type)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{ContentBlock, Metadata, Msg, Role};
+    use super::{ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, Role};
 
     #[test]
     fn roles_use_agentscope_wire_values() {
@@ -260,5 +497,111 @@ mod tests {
             serde_json::to_value(message).unwrap()["content"],
             Value::Array(vec![])
         );
+    }
+
+    #[test]
+    fn url_data_block_uses_agentscope_wire_format() {
+        let block = DataBlock::url("https://example.com/image.png", "image/png")
+            .unwrap()
+            .with_name("diagram.png");
+        let DataSource::Url(source) = &block.source else {
+            panic!("expected URL source");
+        };
+        assert_eq!(source.url().as_str(), "https://example.com/image.png");
+        assert_eq!(source.media_type(), "image/png");
+        let value = serde_json::to_value(ContentBlock::from(block)).unwrap();
+
+        assert_eq!(value["type"], "data");
+        assert_eq!(value["source"]["type"], "url");
+        assert_eq!(value["source"]["url"], "https://example.com/image.png");
+        assert_eq!(value["source"]["media_type"], "image/png");
+        assert_eq!(value["name"], "diagram.png");
+    }
+
+    #[test]
+    fn base64_data_block_uses_agentscope_wire_format() {
+        let block = DataBlock::base64("aGVsbG8=", "text/plain").unwrap();
+        let DataSource::Base64(source) = &block.source else {
+            panic!("expected Base64 source");
+        };
+        assert_eq!(source.data(), "aGVsbG8=");
+        assert_eq!(source.media_type(), "text/plain");
+        let value = serde_json::to_value(ContentBlock::from(block)).unwrap();
+
+        assert_eq!(value["type"], "data");
+        assert_eq!(value["source"]["type"], "base64");
+        assert_eq!(value["source"]["data"], "aGVsbG8=");
+        assert_eq!(value["source"]["media_type"], "text/plain");
+    }
+
+    #[test]
+    fn mixed_message_round_trip_preserves_text_and_data() {
+        let original = Msg::new(
+            "user",
+            Role::User,
+            [
+                ContentBlock::from("Describe this image"),
+                ContentBlock::from(
+                    DataBlock::url("https://example.com/cat.jpg", "image/jpeg").unwrap(),
+                ),
+            ],
+        );
+
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Msg = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored, original);
+        assert_eq!(
+            restored.text_content("\n").as_deref(),
+            Some("Describe this image")
+        );
+        assert!(matches!(restored.content[1], ContentBlock::Data(_)));
+    }
+
+    #[test]
+    fn constructors_reject_invalid_data_sources() {
+        assert!(matches!(
+            DataBlock::url("relative/image.png", "image/png"),
+            Err(DataBlockError::InvalidUrl(_))
+        ));
+        assert!(matches!(
+            DataBlock::base64("not base64!", "image/png"),
+            Err(DataBlockError::InvalidBase64(_))
+        ));
+        assert_eq!(
+            DataBlock::base64("", "  ").unwrap_err(),
+            DataBlockError::EmptyMediaType
+        );
+    }
+
+    #[test]
+    fn deserialization_rejects_invalid_data_sources() {
+        let invalid_url = json!({
+            "type": "data",
+            "id": "block-1",
+            "source": {
+                "type": "url",
+                "url": "relative/image.png",
+                "media_type": "image/png"
+            },
+            "name": null,
+            "created_at": "2026-08-12T12:00:00.000000",
+            "finished_at": null
+        });
+        let invalid_base64 = json!({
+            "type": "data",
+            "id": "block-2",
+            "source": {
+                "type": "base64",
+                "data": "not base64!",
+                "media_type": "image/png"
+            },
+            "name": null,
+            "created_at": "2026-08-12T12:00:00.000000",
+            "finished_at": null
+        });
+
+        assert!(serde_json::from_value::<ContentBlock>(invalid_url).is_err());
+        assert!(serde_json::from_value::<ContentBlock>(invalid_base64).is_err());
     }
 }

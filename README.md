@@ -34,9 +34,9 @@ behavioral compatibility will be evaluated feature by feature.
 
 **Milestone 1 — core types**
 
-The project foundation and continuous integration are in place. The first
-public API now provides roles, text content blocks, messages, JSON metadata,
-and serialization. Multimodal and tool-related blocks are next.
+The project foundation and continuous integration are in place. The public API
+now provides roles, text and validated multimodal data blocks, messages, JSON
+metadata, and serialization. Thinking and tool-related blocks are next.
 
 ```rust
 // Target API direction — illustrative only, not implemented yet.
@@ -69,7 +69,7 @@ after they have been exercised by working examples.
 ### Milestone 1 — Core Types
 
 - [x] Define `Msg`, roles, metadata, and text content blocks
-- [ ] Add multimodal data blocks
+- [x] Add multimodal data blocks
 - [ ] Define tool-use, tool-result, thinking, and structured-output blocks
 - [ ] Introduce shared error, result, usage, and streaming event types
 - [ ] Define object state snapshot and restore conventions

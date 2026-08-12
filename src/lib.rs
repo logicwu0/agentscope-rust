@@ -4,7 +4,10 @@
 
 pub mod message;
 
-pub use message::{ContentBlock, Metadata, Msg, Role, TextBlock};
+pub use message::{
+    Base64Source, ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, Role,
+    TextBlock, UrlSource,
+};
 
 /// The current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
