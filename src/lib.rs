@@ -1,9 +1,10 @@
 //! `AgentScope` for Rust.
-//!
-//! The public API is intentionally empty while the project scope and
-//! compatibility goals are being designed.
 
 #![forbid(unsafe_code)]
+
+pub mod message;
+
+pub use message::{ContentBlock, Metadata, Msg, Role, TextBlock};
 
 /// The current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -32,10 +32,11 @@ behavioral compatibility will be evaluated feature by feature.
 
 ## Current Status
 
-**Milestone 0 — project bootstrap**
+**Milestone 1 — core types**
 
-The repository, package metadata, formatting rules, lint policy, and license
-are in place. The public framework API has not been implemented yet.
+The project foundation and continuous integration are in place. The first
+public API now provides roles, text content blocks, messages, JSON metadata,
+and serialization. Multimodal and tool-related blocks are next.
 
 ```rust
 // Target API direction — illustrative only, not implemented yet.
@@ -67,7 +68,8 @@ after they have been exercised by working examples.
 
 ### Milestone 1 — Core Types
 
-- [ ] Define `Msg`, roles, metadata, and multimodal content blocks
+- [x] Define `Msg`, roles, metadata, and text content blocks
+- [ ] Add multimodal data blocks
 - [ ] Define tool-use, tool-result, thinking, and structured-output blocks
 - [ ] Introduce shared error, result, usage, and streaming event types
 - [ ] Define object state snapshot and restore conventions
