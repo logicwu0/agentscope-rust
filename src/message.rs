@@ -61,6 +61,95 @@ impl TextBlock {
     }
 }
 
+/// An error returned when adding provider-specific thinking fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThinkingBlockError {
+    /// An extension attempted to replace a standard thinking block field.
+    ReservedField(String),
+}
+
+impl fmt::Display for ThinkingBlockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReservedField(field) => {
+                write!(formatter, "provider field `{field}` is reserved")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ThinkingBlockError {}
+
+/// A model's reasoning content.
+///
+/// Provider-specific fields such as Anthropic's `signature` and
+/// `redacted_thinking_data` are preserved in the flattened JSON object.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ThinkingBlock {
+    /// The reasoning text. This can be empty for redacted thinking blocks.
+    pub thinking: String,
+    /// The unique block identifier.
+    pub id: String,
+    /// The local creation time in ISO 8601 format.
+    pub created_at: String,
+    /// The completion time for streamed content, when available.
+    pub finished_at: Option<String>,
+    /// Additional provider-specific JSON fields.
+    #[serde(default, flatten)]
+    extra: Metadata,
+}
+
+impl ThinkingBlock {
+    /// Creates a thinking block.
+    #[must_use]
+    pub fn new(thinking: impl Into<String>) -> Self {
+        Self {
+            thinking: thinking.into(),
+            id: generate_id(),
+            created_at: generate_timestamp(),
+            finished_at: None,
+            extra: Metadata::new(),
+        }
+    }
+
+    /// Adds one provider-specific JSON field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ThinkingBlockError::ReservedField`] if `key` is one of the
+    /// standard serialized fields.
+    pub fn with_extra_field(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<Value>,
+    ) -> Result<Self, ThinkingBlockError> {
+        let key = key.into();
+        validate_thinking_extra_key(&key)?;
+        self.extra.insert(key, value.into());
+        Ok(self)
+    }
+
+    /// Replaces the provider-specific JSON fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ThinkingBlockError::ReservedField`] if any key is one of the
+    /// standard serialized fields.
+    pub fn with_extra_fields(mut self, extra: Metadata) -> Result<Self, ThinkingBlockError> {
+        for key in extra.keys() {
+            validate_thinking_extra_key(key)?;
+        }
+        self.extra = extra;
+        Ok(self)
+    }
+
+    /// Returns the provider-specific JSON fields.
+    #[must_use]
+    pub const fn extra_fields(&self) -> &Metadata {
+        &self.extra
+    }
+}
+
 /// An error returned when constructing or decoding a data block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataBlockError {
@@ -288,6 +377,8 @@ impl DataBlock {
 pub enum ContentBlock {
     /// Plain-text content.
     Text(TextBlock),
+    /// Model reasoning content.
+    Thinking(ThinkingBlock),
     /// Binary or multimodal data.
     Data(DataBlock),
 }
@@ -298,7 +389,7 @@ impl ContentBlock {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(block) => Some(block.text.as_str()),
-            Self::Data(_) => None,
+            Self::Thinking(_) | Self::Data(_) => None,
         }
     }
 }
@@ -306,6 +397,12 @@ impl ContentBlock {
 impl From<TextBlock> for ContentBlock {
     fn from(block: TextBlock) -> Self {
         Self::Text(block)
+    }
+}
+
+impl From<ThinkingBlock> for ContentBlock {
+    fn from(block: ThinkingBlock) -> Self {
+        Self::Thinking(block)
     }
 }
 
@@ -424,11 +521,23 @@ fn validate_media_type(media_type: String) -> Result<String, DataBlockError> {
     }
 }
 
+fn validate_thinking_extra_key(key: &str) -> Result<(), ThinkingBlockError> {
+    const RESERVED_FIELDS: [&str; 5] = ["type", "thinking", "id", "created_at", "finished_at"];
+    if RESERVED_FIELDS.contains(&key) {
+        Err(ThinkingBlockError::ReservedField(key.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, Role};
+    use super::{
+        ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, Role, ThinkingBlock,
+        ThinkingBlockError,
+    };
 
     #[test]
     fn roles_use_agentscope_wire_values() {
@@ -603,5 +712,66 @@ mod tests {
 
         assert!(serde_json::from_value::<ContentBlock>(invalid_url).is_err());
         assert!(serde_json::from_value::<ContentBlock>(invalid_base64).is_err());
+    }
+
+    #[test]
+    fn thinking_block_uses_agentscope_wire_format() {
+        let block = ThinkingBlock::new("I should inspect the request first.");
+        let value = serde_json::to_value(ContentBlock::from(block)).unwrap();
+
+        assert_eq!(value["type"], "thinking");
+        assert_eq!(value["thinking"], "I should inspect the request first.");
+        assert_eq!(value["id"].as_str().unwrap().len(), 32);
+        assert!(value["created_at"].is_string());
+        assert!(value["finished_at"].is_null());
+    }
+
+    #[test]
+    fn thinking_provider_fields_survive_json_round_trip() {
+        let block = ThinkingBlock::new("")
+            .with_extra_field("signature", "sig-123")
+            .unwrap()
+            .with_extra_field("redacted_thinking_data", "encrypted-payload")
+            .unwrap();
+        let original = Msg::new("Friday", Role::Assistant, [ContentBlock::from(block)]);
+
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Msg = serde_json::from_str(&json).unwrap();
+        let ContentBlock::Thinking(restored_block) = &restored.content[0] else {
+            panic!("expected thinking block");
+        };
+
+        assert_eq!(restored, original);
+        assert_eq!(restored_block.extra_fields()["signature"], "sig-123");
+        assert_eq!(
+            restored_block.extra_fields()["redacted_thinking_data"],
+            "encrypted-payload"
+        );
+    }
+
+    #[test]
+    fn text_content_excludes_thinking_blocks() {
+        let message = Msg::new(
+            "Friday",
+            Role::Assistant,
+            [
+                ContentBlock::from(ThinkingBlock::new("Internal reasoning")),
+                ContentBlock::from("Final answer"),
+            ],
+        );
+
+        assert_eq!(message.text_content("\n").as_deref(), Some("Final answer"));
+    }
+
+    #[test]
+    fn thinking_extensions_cannot_replace_standard_fields() {
+        for field in ["type", "thinking", "id", "created_at", "finished_at"] {
+            assert_eq!(
+                ThinkingBlock::new("reasoning")
+                    .with_extra_field(field, "replacement")
+                    .unwrap_err(),
+                ThinkingBlockError::ReservedField(field.to_owned())
+            );
+        }
     }
 }

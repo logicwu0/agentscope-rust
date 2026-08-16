@@ -6,7 +6,7 @@ pub mod message;
 
 pub use message::{
     Base64Source, ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, Role,
-    TextBlock, UrlSource,
+    TextBlock, ThinkingBlock, ThinkingBlockError, UrlSource,
 };
 
 /// The current crate version.
