@@ -376,6 +376,311 @@ impl<'de> Deserialize<'de> for ToolCallBlock {
     }
 }
 
+/// The execution state of a tool result.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolResultState {
+    /// The tool is still executing or streaming output.
+    #[default]
+    Running,
+    /// The tool completed successfully.
+    Success,
+    /// The tool failed.
+    Error,
+    /// The tool was interrupted before completion.
+    Interrupted,
+    /// Execution was denied by the permission system or user.
+    Denied,
+}
+
+impl ToolResultState {
+    /// Returns whether this state ends the tool execution lifecycle.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
+impl fmt::Display for ToolResultState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Running => "running",
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Interrupted => "interrupted",
+            Self::Denied => "denied",
+        })
+    }
+}
+
+/// A content block allowed inside structured tool output.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolResultContent {
+    /// Plain-text tool output.
+    Text(TextBlock),
+    /// Binary or multimodal tool output.
+    Data(DataBlock),
+}
+
+impl From<TextBlock> for ToolResultContent {
+    fn from(block: TextBlock) -> Self {
+        Self::Text(block)
+    }
+}
+
+impl From<DataBlock> for ToolResultContent {
+    fn from(block: DataBlock) -> Self {
+        Self::Data(block)
+    }
+}
+
+/// The output carried by a tool result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ToolResultOutput {
+    /// A raw text result.
+    Text(String),
+    /// Structured text and multimodal result blocks.
+    Blocks(Vec<ToolResultContent>),
+}
+
+impl From<String> for ToolResultOutput {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for ToolResultOutput {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
+}
+
+impl From<Vec<ToolResultContent>> for ToolResultOutput {
+    fn from(blocks: Vec<ToolResultContent>) -> Self {
+        Self::Blocks(blocks)
+    }
+}
+
+/// An error returned when constructing or finishing a tool result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolResultError {
+    /// The tool call identifier was empty.
+    EmptyId,
+    /// The tool name was empty or contained only whitespace.
+    EmptyName,
+    /// `running` was supplied where a terminal state was required.
+    NonTerminalState,
+}
+
+impl fmt::Display for ToolResultError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyId => formatter.write_str("tool result id cannot be empty"),
+            Self::EmptyName => formatter.write_str("tool name cannot be empty"),
+            Self::NonTerminalState => {
+                formatter.write_str("running is not a terminal tool result state")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ToolResultError {}
+
+/// The output produced by a tool invocation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ToolResultBlock {
+    /// The identifier shared with the corresponding tool call.
+    id: String,
+    /// The invoked tool's name.
+    name: String,
+    /// The raw or structured tool output.
+    output: ToolResultOutput,
+    /// The current execution state.
+    state: ToolResultState,
+    /// Arbitrary result metadata.
+    #[serde(default)]
+    pub metadata: Metadata,
+    /// The local creation time in ISO 8601 format.
+    pub created_at: String,
+    /// The completion time, when available.
+    pub finished_at: Option<String>,
+}
+
+impl ToolResultBlock {
+    /// Creates an empty result for a running tool call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolResultError::EmptyId`] or [`ToolResultError::EmptyName`]
+    /// when the corresponding value is blank.
+    pub fn running(
+        id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<Self, ToolResultError> {
+        let id = id.into();
+        let name = name.into();
+        validate_tool_result_identity(&id, &name)?;
+        Ok(Self {
+            id,
+            name,
+            output: ToolResultOutput::Blocks(Vec::new()),
+            state: ToolResultState::Running,
+            metadata: Metadata::new(),
+            created_at: generate_timestamp(),
+            finished_at: None,
+        })
+    }
+
+    /// Creates a finished result with a terminal state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity error when `id` or `name` is blank, or
+    /// [`ToolResultError::NonTerminalState`] when `state` is `running`.
+    pub fn finished(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        output: impl Into<ToolResultOutput>,
+        state: ToolResultState,
+    ) -> Result<Self, ToolResultError> {
+        let mut block = Self::running(id, name)?;
+        block.output = output.into();
+        block.finish(state)?;
+        Ok(block)
+    }
+
+    /// Creates a successfully finished result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolResultError::EmptyId`] or [`ToolResultError::EmptyName`]
+    /// when the corresponding value is blank.
+    pub fn success(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        output: impl Into<ToolResultOutput>,
+    ) -> Result<Self, ToolResultError> {
+        Self::finished(id, name, output, ToolResultState::Success)
+    }
+
+    /// Returns the corresponding tool call identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns the tool name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the current output.
+    #[must_use]
+    pub const fn output(&self) -> &ToolResultOutput {
+        &self.output
+    }
+
+    /// Returns the current execution state.
+    #[must_use]
+    pub const fn state(&self) -> ToolResultState {
+        self.state
+    }
+
+    /// Appends a streaming text fragment, merging adjacent text blocks.
+    pub fn append_text_delta(&mut self, delta: &str) {
+        let blocks = self.output_blocks_mut();
+        match blocks.last_mut() {
+            Some(ToolResultContent::Text(block)) => block.text.push_str(delta),
+            Some(ToolResultContent::Data(_)) | None => {
+                blocks.push(ToolResultContent::Text(TextBlock::new(delta)));
+            }
+        }
+    }
+
+    /// Appends multimodal data to the structured output.
+    pub fn append_data(&mut self, block: DataBlock) {
+        self.output_blocks_mut()
+            .push(ToolResultContent::Data(block));
+    }
+
+    /// Replaces the result metadata.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Marks this result as finished with a terminal state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolResultError::NonTerminalState`] when `state` is
+    /// `running`.
+    pub fn finish(&mut self, state: ToolResultState) -> Result<(), ToolResultError> {
+        if !state.is_terminal() {
+            return Err(ToolResultError::NonTerminalState);
+        }
+        self.state = state;
+        self.finished_at = Some(generate_timestamp());
+        Ok(())
+    }
+
+    fn output_blocks_mut(&mut self) -> &mut Vec<ToolResultContent> {
+        if let ToolResultOutput::Text(_) = &self.output {
+            let ToolResultOutput::Text(text) =
+                std::mem::replace(&mut self.output, ToolResultOutput::Blocks(Vec::new()))
+            else {
+                unreachable!("tool output was checked as text")
+            };
+            if !text.is_empty() {
+                self.output =
+                    ToolResultOutput::Blocks(vec![ToolResultContent::Text(TextBlock::new(text))]);
+            }
+        }
+        let ToolResultOutput::Blocks(blocks) = &mut self.output else {
+            unreachable!("raw tool output was converted to blocks")
+        };
+        blocks
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolResultBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireBlock {
+            id: String,
+            name: String,
+            output: ToolResultOutput,
+            #[serde(default)]
+            state: ToolResultState,
+            #[serde(default)]
+            metadata: Metadata,
+            #[serde(default = "generate_timestamp")]
+            created_at: String,
+            #[serde(default)]
+            finished_at: Option<String>,
+        }
+
+        let block = WireBlock::deserialize(deserializer)?;
+        validate_tool_result_identity(&block.id, &block.name).map_err(de::Error::custom)?;
+        Ok(Self {
+            id: block.id,
+            name: block.name,
+            output: block.output,
+            state: block.state,
+            metadata: block.metadata,
+            created_at: block.created_at,
+            finished_at: block.finished_at,
+        })
+    }
+}
+
 /// An error returned when constructing or decoding a data block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataBlockError {
@@ -607,6 +912,8 @@ pub enum ContentBlock {
     Thinking(ThinkingBlock),
     /// A request to invoke a tool.
     ToolCall(ToolCallBlock),
+    /// Output produced by a tool invocation.
+    ToolResult(ToolResultBlock),
     /// Binary or multimodal data.
     Data(DataBlock),
 }
@@ -617,7 +924,7 @@ impl ContentBlock {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(block) => Some(block.text.as_str()),
-            Self::Thinking(_) | Self::ToolCall(_) | Self::Data(_) => None,
+            Self::Thinking(_) | Self::ToolCall(_) | Self::ToolResult(_) | Self::Data(_) => None,
         }
     }
 }
@@ -637,6 +944,12 @@ impl From<ThinkingBlock> for ContentBlock {
 impl From<ToolCallBlock> for ContentBlock {
     fn from(block: ToolCallBlock) -> Self {
         Self::ToolCall(block)
+    }
+}
+
+impl From<ToolResultBlock> for ContentBlock {
+    fn from(block: ToolResultBlock) -> Self {
+        Self::ToolResult(block)
     }
 }
 
@@ -774,6 +1087,16 @@ fn validate_tool_call_identity(id: &str, name: &str) -> Result<(), ToolCallError
     }
 }
 
+fn validate_tool_result_identity(id: &str, name: &str) -> Result<(), ToolResultError> {
+    if id.trim().is_empty() {
+        Err(ToolResultError::EmptyId)
+    } else if name.trim().is_empty() {
+        Err(ToolResultError::EmptyName)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -781,7 +1104,8 @@ mod tests {
     use super::{
         ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, PermissionBehavior,
         PermissionRule, Role, ThinkingBlock, ThinkingBlockError, ToolCallBlock, ToolCallError,
-        ToolCallState,
+        ToolCallState, ToolResultBlock, ToolResultContent, ToolResultError, ToolResultOutput,
+        ToolResultState,
     };
 
     #[test]
@@ -1145,6 +1469,170 @@ mod tests {
         assert_eq!(
             message.text_content("\n").as_deref(),
             Some("I will search for that.")
+        );
+    }
+
+    #[test]
+    fn tool_result_states_use_agentscope_wire_values() {
+        for (state, expected) in [
+            (ToolResultState::Running, "running"),
+            (ToolResultState::Success, "success"),
+            (ToolResultState::Error, "error"),
+            (ToolResultState::Interrupted, "interrupted"),
+            (ToolResultState::Denied, "denied"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), expected);
+            assert_eq!(state.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn running_tool_result_uses_agentscope_wire_format() {
+        let block = ToolResultBlock::running("call-1", "get_weather").unwrap();
+        assert_eq!(block.id(), "call-1");
+        assert_eq!(block.name(), "get_weather");
+        assert_eq!(block.state(), ToolResultState::Running);
+        let value = serde_json::to_value(ContentBlock::from(block)).unwrap();
+
+        assert_eq!(value["type"], "tool_result");
+        assert_eq!(value["output"], json!([]));
+        assert_eq!(value["state"], "running");
+        assert_eq!(value["metadata"], json!({}));
+        assert!(value["finished_at"].is_null());
+    }
+
+    #[test]
+    fn successful_raw_tool_result_round_trips() {
+        let original = ToolResultBlock::success("call-2", "get_weather", "Sunny").unwrap();
+        assert_eq!(original.state(), ToolResultState::Success);
+        assert!(original.finished_at.is_some());
+        assert_eq!(original.output(), &ToolResultOutput::Text("Sunny".into()));
+
+        let json = serde_json::to_string(&ContentBlock::from(original.clone())).unwrap();
+        let restored: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, ContentBlock::from(original));
+    }
+
+    #[test]
+    fn streaming_tool_result_merges_text_and_preserves_multimodal_output() {
+        let mut block = ToolResultBlock::running("call-3", "inspect_image").unwrap();
+        block.append_text_delta("Found ");
+        block.append_text_delta("a cat.");
+        block.append_data(DataBlock::url("https://example.com/cat.jpg", "image/jpeg").unwrap());
+        block.append_text_delta(" High confidence.");
+        block.finish(ToolResultState::Success).unwrap();
+
+        let value = serde_json::to_value(ContentBlock::from(block.clone())).unwrap();
+        assert_eq!(value["output"][0]["type"], "text");
+        assert_eq!(value["output"][0]["text"], "Found a cat.");
+        assert_eq!(value["output"][1]["type"], "data");
+        assert_eq!(value["output"][2]["text"], " High confidence.");
+
+        let restored: ContentBlock = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, ContentBlock::from(block));
+    }
+
+    #[test]
+    fn appending_to_raw_output_converts_it_to_structured_blocks() {
+        let json = json!({
+            "type": "tool_result",
+            "id": "call-4",
+            "name": "search",
+            "output": "First",
+            "state": "running",
+            "metadata": {},
+            "created_at": "2026-08-19T12:00:00.000000",
+            "finished_at": null
+        });
+        let ContentBlock::ToolResult(mut block) =
+            serde_json::from_value::<ContentBlock>(json).unwrap()
+        else {
+            panic!("expected tool result block");
+        };
+
+        block.append_text_delta(" second");
+        let ToolResultOutput::Blocks(blocks) = block.output() else {
+            panic!("expected structured output");
+        };
+        let ToolResultContent::Text(text) = &blocks[0] else {
+            panic!("expected text output");
+        };
+        assert_eq!(text.text, "First second");
+    }
+
+    #[test]
+    fn tool_result_finish_requires_terminal_state() {
+        let mut block = ToolResultBlock::running("call-5", "search").unwrap();
+        assert_eq!(
+            block.finish(ToolResultState::Running).unwrap_err(),
+            ToolResultError::NonTerminalState
+        );
+        assert_eq!(block.state(), ToolResultState::Running);
+        assert!(block.finished_at.is_none());
+    }
+
+    #[test]
+    fn tool_result_metadata_and_terminal_state_round_trip() {
+        let mut metadata = Metadata::new();
+        metadata.insert("status_code".into(), json!(403));
+        let original = ToolResultBlock::finished(
+            "call-6",
+            "write_file",
+            "Permission denied",
+            ToolResultState::Denied,
+        )
+        .unwrap()
+        .with_metadata(metadata);
+
+        let value = serde_json::to_value(ContentBlock::from(original.clone())).unwrap();
+        assert_eq!(value["state"], "denied");
+        assert_eq!(value["metadata"]["status_code"], 403);
+        assert_eq!(
+            serde_json::from_value::<ContentBlock>(value).unwrap(),
+            ContentBlock::from(original)
+        );
+    }
+
+    #[test]
+    fn tool_result_rejects_blank_identity() {
+        assert_eq!(
+            ToolResultBlock::running("", "search").unwrap_err(),
+            ToolResultError::EmptyId
+        );
+        assert_eq!(
+            ToolResultBlock::running("call-1", "  ").unwrap_err(),
+            ToolResultError::EmptyName
+        );
+
+        let invalid = json!({
+            "type": "tool_result",
+            "id": "call-1",
+            "name": "",
+            "output": "",
+            "state": "running",
+            "metadata": {},
+            "created_at": "2026-08-19T12:00:00.000000",
+            "finished_at": null
+        });
+        assert!(serde_json::from_value::<ContentBlock>(invalid).is_err());
+    }
+
+    #[test]
+    fn text_content_excludes_tool_results() {
+        let message = Msg::new(
+            "Friday",
+            Role::Assistant,
+            [
+                ContentBlock::from(
+                    ToolResultBlock::success("call-7", "search", "internal result").unwrap(),
+                ),
+                ContentBlock::from("Here is the answer."),
+            ],
+        );
+
+        assert_eq!(
+            message.text_content("\n").as_deref(),
+            Some("Here is the answer.")
         );
     }
 }
