@@ -150,6 +150,232 @@ impl ThinkingBlock {
     }
 }
 
+/// The behavior applied when a permission rule matches a tool call.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionBehavior {
+    /// Permit the tool call without prompting.
+    Allow,
+    /// Reject the tool call.
+    Deny,
+    /// Ask the user before executing the tool call.
+    Ask,
+}
+
+/// A permission suggestion associated with a tool call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PermissionRule {
+    /// The tool this rule applies to.
+    pub tool_name: String,
+    /// An optional tool-specific match expression.
+    pub rule_content: Option<String>,
+    /// The behavior to apply when the rule matches.
+    pub behavior: PermissionBehavior,
+    /// The origin of this rule.
+    pub source: String,
+}
+
+/// The lifecycle state of a tool call.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolCallState {
+    /// The call has not yet passed through the permission system.
+    #[default]
+    Pending,
+    /// The call is waiting for user confirmation.
+    Asking,
+    /// The call is permitted and waiting for execution.
+    Allowed,
+    /// The call was submitted for external execution.
+    Submitted,
+    /// The call lifecycle has ended.
+    Finished,
+}
+
+impl fmt::Display for ToolCallState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Pending => "pending",
+            Self::Asking => "asking",
+            Self::Allowed => "allowed",
+            Self::Submitted => "submitted",
+            Self::Finished => "finished",
+        })
+    }
+}
+
+/// An error returned when constructing or validating a tool call.
+#[derive(Debug)]
+pub enum ToolCallError {
+    /// The provider supplied an empty tool call identifier.
+    EmptyId,
+    /// The tool name was empty or contained only whitespace.
+    EmptyName,
+    /// A completed tool call contained malformed JSON input.
+    InvalidInput(serde_json::Error),
+}
+
+impl fmt::Display for ToolCallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyId => formatter.write_str("tool call id cannot be empty"),
+            Self::EmptyName => formatter.write_str("tool name cannot be empty"),
+            Self::InvalidInput(error) => write!(formatter, "invalid tool input JSON: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ToolCallError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidInput(error) => Some(error),
+            Self::EmptyId | Self::EmptyName => None,
+        }
+    }
+}
+
+/// A model request to invoke a tool.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ToolCallBlock {
+    /// The provider-assigned tool call identifier.
+    id: String,
+    /// The tool to invoke.
+    name: String,
+    /// Raw JSON input, which may be incomplete while streaming.
+    input: String,
+    /// The tool call's current lifecycle state.
+    pub state: ToolCallState,
+    /// Permission rules suggested while requesting confirmation.
+    pub suggested_rules: Vec<PermissionRule>,
+    /// The local creation time in ISO 8601 format.
+    pub created_at: String,
+    /// The completion time, when available.
+    pub finished_at: Option<String>,
+}
+
+impl ToolCallBlock {
+    /// Creates a tool call whose input will arrive incrementally.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolCallError::EmptyId`] or [`ToolCallError::EmptyName`] when
+    /// the corresponding value is blank.
+    pub fn streaming(
+        id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<Self, ToolCallError> {
+        let id = id.into();
+        let name = name.into();
+        validate_tool_call_identity(&id, &name)?;
+
+        Ok(Self {
+            id,
+            name,
+            input: String::new(),
+            state: ToolCallState::Pending,
+            suggested_rules: Vec::new(),
+            created_at: generate_timestamp(),
+            finished_at: None,
+        })
+    }
+
+    /// Creates a tool call with complete, validated JSON input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolCallError::EmptyId`] or [`ToolCallError::EmptyName`] when
+    /// the corresponding value is blank, or [`ToolCallError::InvalidInput`]
+    /// when `input` is not valid JSON.
+    pub fn complete(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        input: impl Into<String>,
+    ) -> Result<Self, ToolCallError> {
+        let mut block = Self::streaming(id, name)?;
+        block.input = input.into();
+        block.validate_input()?;
+        Ok(block)
+    }
+
+    /// Returns the tool name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the provider-assigned tool call identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns the raw JSON input accumulated so far.
+    #[must_use]
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    /// Appends a raw input fragment received from a streaming model response.
+    pub fn append_input(&mut self, delta: &str) {
+        self.input.push_str(delta);
+    }
+
+    /// Parses the current input as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolCallError::InvalidInput`] while the input is incomplete
+    /// or malformed.
+    pub fn parsed_input(&self) -> Result<Value, ToolCallError> {
+        serde_json::from_str(&self.input).map_err(ToolCallError::InvalidInput)
+    }
+
+    /// Replaces the suggested permission rules.
+    #[must_use]
+    pub fn with_suggested_rules(mut self, rules: Vec<PermissionRule>) -> Self {
+        self.suggested_rules = rules;
+        self
+    }
+
+    fn validate_input(&self) -> Result<(), ToolCallError> {
+        self.parsed_input().map(|_| ())
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolCallBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireBlock {
+            id: String,
+            name: String,
+            input: String,
+            #[serde(default)]
+            state: ToolCallState,
+            #[serde(default)]
+            suggested_rules: Vec<PermissionRule>,
+            #[serde(default = "generate_timestamp")]
+            created_at: String,
+            #[serde(default)]
+            finished_at: Option<String>,
+        }
+
+        let block = WireBlock::deserialize(deserializer)?;
+        validate_tool_call_identity(&block.id, &block.name).map_err(de::Error::custom)?;
+        Ok(Self {
+            id: block.id,
+            name: block.name,
+            input: block.input,
+            state: block.state,
+            suggested_rules: block.suggested_rules,
+            created_at: block.created_at,
+            finished_at: block.finished_at,
+        })
+    }
+}
+
 /// An error returned when constructing or decoding a data block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataBlockError {
@@ -379,6 +605,8 @@ pub enum ContentBlock {
     Text(TextBlock),
     /// Model reasoning content.
     Thinking(ThinkingBlock),
+    /// A request to invoke a tool.
+    ToolCall(ToolCallBlock),
     /// Binary or multimodal data.
     Data(DataBlock),
 }
@@ -389,7 +617,7 @@ impl ContentBlock {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(block) => Some(block.text.as_str()),
-            Self::Thinking(_) | Self::Data(_) => None,
+            Self::Thinking(_) | Self::ToolCall(_) | Self::Data(_) => None,
         }
     }
 }
@@ -403,6 +631,12 @@ impl From<TextBlock> for ContentBlock {
 impl From<ThinkingBlock> for ContentBlock {
     fn from(block: ThinkingBlock) -> Self {
         Self::Thinking(block)
+    }
+}
+
+impl From<ToolCallBlock> for ContentBlock {
+    fn from(block: ToolCallBlock) -> Self {
+        Self::ToolCall(block)
     }
 }
 
@@ -530,13 +764,24 @@ fn validate_thinking_extra_key(key: &str) -> Result<(), ThinkingBlockError> {
     }
 }
 
+fn validate_tool_call_identity(id: &str, name: &str) -> Result<(), ToolCallError> {
+    if id.trim().is_empty() {
+        Err(ToolCallError::EmptyId)
+    } else if name.trim().is_empty() {
+        Err(ToolCallError::EmptyName)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, Role, ThinkingBlock,
-        ThinkingBlockError,
+        ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, PermissionBehavior,
+        PermissionRule, Role, ThinkingBlock, ThinkingBlockError, ToolCallBlock, ToolCallError,
+        ToolCallState,
     };
 
     #[test]
@@ -773,5 +1018,133 @@ mod tests {
                 ThinkingBlockError::ReservedField(field.to_owned())
             );
         }
+    }
+
+    #[test]
+    fn tool_call_states_use_agentscope_wire_values() {
+        for (state, expected) in [
+            (ToolCallState::Pending, "pending"),
+            (ToolCallState::Asking, "asking"),
+            (ToolCallState::Allowed, "allowed"),
+            (ToolCallState::Submitted, "submitted"),
+            (ToolCallState::Finished, "finished"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), expected);
+            assert_eq!(state.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn complete_tool_call_uses_agentscope_wire_format() {
+        let rule = PermissionRule {
+            tool_name: "get_weather".into(),
+            rule_content: Some("Hangzhou".into()),
+            behavior: PermissionBehavior::Ask,
+            source: "model".into(),
+        };
+        let block = ToolCallBlock::complete("call-123", "get_weather", r#"{"city":"Hangzhou"}"#)
+            .unwrap()
+            .with_suggested_rules(vec![rule]);
+        assert_eq!(block.id(), "call-123");
+        assert_eq!(block.name(), "get_weather");
+        let value = serde_json::to_value(ContentBlock::from(block)).unwrap();
+
+        assert_eq!(value["type"], "tool_call");
+        assert_eq!(value["id"], "call-123");
+        assert_eq!(value["name"], "get_weather");
+        assert_eq!(value["input"], r#"{"city":"Hangzhou"}"#);
+        assert_eq!(value["state"], "pending");
+        assert_eq!(value["suggested_rules"][0]["behavior"], "ask");
+    }
+
+    #[test]
+    fn streaming_tool_call_accepts_partial_input() {
+        let mut block = ToolCallBlock::streaming("call-1", "get_weather").unwrap();
+        block.append_input("{\"city\":\"");
+        assert!(matches!(
+            block.parsed_input(),
+            Err(ToolCallError::InvalidInput(_))
+        ));
+
+        block.append_input("Hangzhou\"}");
+        assert_eq!(block.parsed_input().unwrap(), json!({"city": "Hangzhou"}));
+    }
+
+    #[test]
+    fn completed_tool_calls_require_valid_identity_and_json() {
+        assert!(matches!(
+            ToolCallBlock::complete("", "get_weather", "{}"),
+            Err(ToolCallError::EmptyId)
+        ));
+        assert!(matches!(
+            ToolCallBlock::complete("call-1", "  ", "{}"),
+            Err(ToolCallError::EmptyName)
+        ));
+        assert!(matches!(
+            ToolCallBlock::complete("call-1", "get_weather", "{"),
+            Err(ToolCallError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn tool_call_json_round_trip_preserves_streaming_input_and_rules() {
+        let json = json!({
+            "type": "tool_call",
+            "id": "call-7",
+            "name": "search",
+            "input": "{\"query\":",
+            "state": "asking",
+            "suggested_rules": [{
+                "tool_name": "search",
+                "rule_content": null,
+                "behavior": "allow",
+                "source": "userSettings"
+            }],
+            "created_at": "2026-08-19T12:00:00.000000",
+            "finished_at": null
+        });
+
+        let block: ContentBlock = serde_json::from_value(json.clone()).unwrap();
+        let ContentBlock::ToolCall(tool_call) = &block else {
+            panic!("expected tool call block");
+        };
+        assert_eq!(tool_call.name(), "search");
+        assert_eq!(tool_call.input(), "{\"query\":");
+        assert_eq!(tool_call.state, ToolCallState::Asking);
+        assert_eq!(serde_json::to_value(block).unwrap(), json);
+    }
+
+    #[test]
+    fn deserialization_rejects_blank_tool_identity() {
+        for (id, name) in [("", "search"), ("call-1", " ")] {
+            let value = json!({
+                "type": "tool_call",
+                "id": id,
+                "name": name,
+                "input": "",
+                "state": "pending",
+                "suggested_rules": [],
+                "created_at": "2026-08-19T12:00:00.000000",
+                "finished_at": null
+            });
+            assert!(serde_json::from_value::<ContentBlock>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn text_content_excludes_tool_calls() {
+        let message = Msg::new(
+            "Friday",
+            Role::Assistant,
+            [
+                ContentBlock::from(ToolCallBlock::complete("call-1", "search", "{}").unwrap()),
+                ContentBlock::from("I will search for that."),
+            ],
+        );
+
+        assert_eq!(
+            message.text_content("\n").as_deref(),
+            Some("I will search for that.")
+        );
     }
 }

@@ -35,8 +35,8 @@ behavioral compatibility will be evaluated feature by feature.
 **Milestone 1 — core types**
 
 The project foundation and continuous integration are in place. The public API
-now provides roles, text, thinking, and validated multimodal data blocks,
-messages, JSON metadata, and serialization. Tool-related blocks are next.
+now provides roles, text, thinking, validated multimodal data blocks, and
+streaming-aware tool calls. Tool results and structured output are next.
 
 ```rust
 // Target API direction — illustrative only, not implemented yet.
@@ -71,7 +71,8 @@ after they have been exercised by working examples.
 - [x] Define `Msg`, roles, metadata, and text content blocks
 - [x] Add multimodal data blocks
 - [x] Define thinking blocks with provider-specific extension fields
-- [ ] Define tool-use, tool-result, and structured-output blocks
+- [x] Define streaming-aware tool-call blocks and permission suggestions
+- [ ] Define tool-result and structured-output blocks
 - [ ] Introduce shared error, result, usage, and streaming event types
 - [ ] Define object state snapshot and restore conventions
 - [ ] Add JSON serialization and compatibility fixtures
