@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 pub mod message;
+pub mod model;
+
+pub use model::{ChatResponse, FinishReason};
 
 pub use message::{
     Base64Source, ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg,
