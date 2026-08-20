@@ -37,8 +37,8 @@ behavioral compatibility will be evaluated feature by feature.
 The project foundation and continuous integration are in place. The public API
 now provides roles, text, thinking, validated multimodal data blocks,
 streaming-aware tool calls, multimodal tool results, and streaming structured
-JSON output blocks. Shared model result, usage, and streaming event types are
-next.
+JSON output blocks, and token usage accounting. Shared model result and
+streaming event types are next.
 
 ```rust
 // Target API direction — illustrative only, not implemented yet.
@@ -76,7 +76,8 @@ after they have been exercised by working examples.
 - [x] Define streaming-aware tool-call blocks and permission suggestions
 - [x] Define streaming and multimodal tool-result blocks
 - [x] Define structured-output blocks
-- [ ] Introduce shared error, result, usage, and streaming event types
+- [x] Introduce a provider-neutral token usage type
+- [ ] Introduce shared error, result, and streaming event types
 - [ ] Define object state snapshot and restore conventions
 - [ ] Add JSON serialization and compatibility fixtures
 

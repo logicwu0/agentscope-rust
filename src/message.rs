@@ -8,6 +8,7 @@ mod structured_output;
 mod thinking;
 mod tool_call;
 mod tool_result;
+mod usage;
 
 use chrono::Local;
 use serde_json::{Map, Value};
@@ -25,6 +26,7 @@ pub use tool_call::{
 pub use tool_result::{
     ToolResultBlock, ToolResultContent, ToolResultError, ToolResultOutput, ToolResultState,
 };
+pub use usage::Usage;
 
 /// Arbitrary JSON metadata attached to a message.
 pub type Metadata = Map<String, Value>;

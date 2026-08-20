@@ -9,7 +9,7 @@ pub use message::{
     PermissionBehavior, PermissionRule, Role, StructuredOutputBlock, StructuredOutputError,
     StructuredOutputState, TextBlock, ThinkingBlock, ThinkingBlockError, ToolCallBlock,
     ToolCallError, ToolCallState, ToolResultBlock, ToolResultContent, ToolResultError,
-    ToolResultOutput, ToolResultState, UrlSource,
+    ToolResultOutput, ToolResultState, UrlSource, Usage,
 };
 
 /// The current crate version.

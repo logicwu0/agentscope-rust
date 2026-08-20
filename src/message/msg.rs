@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ContentBlock, Metadata, Role, generate_id, generate_timestamp};
+use super::{ContentBlock, Metadata, Role, Usage, generate_id, generate_timestamp};
 
 /// A message exchanged within an `AgentScope` application.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -18,6 +18,9 @@ pub struct Msg {
     /// Arbitrary application metadata.
     #[serde(default)]
     pub metadata: Metadata,
+    /// Token usage associated with this message, when reported by a model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
     /// The local creation time in ISO 8601 format.
     pub created_at: String,
 }
@@ -36,6 +39,7 @@ impl Msg {
             role,
             id: generate_id(),
             metadata: Metadata::new(),
+            usage: None,
             created_at: generate_timestamp(),
         }
     }
@@ -62,6 +66,13 @@ impl Msg {
     #[must_use]
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    /// Attaches model token usage to this message.
+    #[must_use]
+    pub const fn with_usage(mut self, usage: Usage) -> Self {
+        self.usage = Some(usage);
         self
     }
 

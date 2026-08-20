@@ -6,7 +6,7 @@ use super::{
     ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, PermissionBehavior,
     PermissionRule, Role, StructuredOutputBlock, StructuredOutputError, StructuredOutputState,
     ThinkingBlock, ThinkingBlockError, ToolCallBlock, ToolCallError, ToolCallState,
-    ToolResultBlock, ToolResultContent, ToolResultError, ToolResultOutput, ToolResultState,
+    ToolResultBlock, ToolResultContent, ToolResultError, ToolResultOutput, ToolResultState, Usage,
 };
 
 #[test]
@@ -642,4 +642,75 @@ fn text_content_excludes_structured_output() {
     );
 
     assert_eq!(message.text_content("\n").as_deref(), Some("Done"));
+}
+
+#[test]
+fn usage_uses_agentscope_core_wire_fields() {
+    let usage = Usage::new(120, 30);
+
+    assert_eq!(usage.total_tokens(), 150);
+    assert_eq!(
+        serde_json::to_value(usage).unwrap(),
+        json!({"input_tokens": 120, "output_tokens": 30})
+    );
+}
+
+#[test]
+fn usage_preserves_optional_provider_details() {
+    let usage = Usage::new(100, 40)
+        .with_reasoning_tokens(15)
+        .with_cached_input_tokens(60);
+    let value = serde_json::to_value(usage).unwrap();
+
+    assert_eq!(value["reasoning_tokens"], 15);
+    assert_eq!(value["cached_input_tokens"], 60);
+    assert_eq!(usage.total_tokens(), 140);
+    assert_eq!(serde_json::from_value::<Usage>(value).unwrap(), usage);
+}
+
+#[test]
+fn usage_accumulates_across_model_calls() {
+    let first = Usage::new(100, 20)
+        .with_reasoning_tokens(5)
+        .with_cached_input_tokens(40);
+    let second = Usage::new(70, 30).with_reasoning_tokens(10);
+    let third = Usage::new(50, 10).with_cached_input_tokens(25);
+
+    let combined = first + second + third;
+
+    assert_eq!(combined.input_tokens, 220);
+    assert_eq!(combined.output_tokens, 60);
+    assert_eq!(combined.reasoning_tokens, Some(15));
+    assert_eq!(combined.cached_input_tokens, Some(65));
+    assert_eq!(combined.total_tokens(), 280);
+}
+
+#[test]
+fn usage_accumulation_saturates_instead_of_overflowing() {
+    let combined = Usage::new(u64::MAX, u64::MAX)
+        + Usage::new(1, 1)
+            .with_reasoning_tokens(u64::MAX)
+            .with_cached_input_tokens(u64::MAX)
+        + Usage::default()
+            .with_reasoning_tokens(1)
+            .with_cached_input_tokens(1);
+
+    assert_eq!(combined.input_tokens, u64::MAX);
+    assert_eq!(combined.output_tokens, u64::MAX);
+    assert_eq!(combined.reasoning_tokens, Some(u64::MAX));
+    assert_eq!(combined.cached_input_tokens, Some(u64::MAX));
+    assert_eq!(combined.total_tokens(), u64::MAX);
+}
+
+#[test]
+fn message_usage_is_optional_and_round_trips() {
+    let without_usage = Msg::assistant("Friday", "Done");
+    let value = serde_json::to_value(&without_usage).unwrap();
+    assert!(value.get("usage").is_none());
+
+    let original = without_usage.with_usage(Usage::new(80, 12));
+    let value = serde_json::to_value(&original).unwrap();
+    assert_eq!(value["usage"]["input_tokens"], 80);
+    assert_eq!(value["usage"]["output_tokens"], 12);
+    assert_eq!(serde_json::from_value::<Msg>(value).unwrap(), original);
 }
