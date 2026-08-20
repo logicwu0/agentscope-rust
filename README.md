@@ -36,7 +36,8 @@ behavioral compatibility will be evaluated feature by feature.
 
 The project foundation and continuous integration are in place. The public API
 now provides roles, text, thinking, validated multimodal data blocks,
-streaming-aware tool calls, and multimodal tool results. Structured output is
+streaming-aware tool calls, multimodal tool results, and streaming structured
+JSON output blocks. Shared model result, usage, and streaming event types are
 next.
 
 ```rust
@@ -74,7 +75,7 @@ after they have been exercised by working examples.
 - [x] Define thinking blocks with provider-specific extension fields
 - [x] Define streaming-aware tool-call blocks and permission suggestions
 - [x] Define streaming and multimodal tool-result blocks
-- [ ] Define structured-output blocks
+- [x] Define structured-output blocks
 - [ ] Introduce shared error, result, usage, and streaming event types
 - [ ] Define object state snapshot and restore conventions
 - [ ] Add JSON serialization and compatibility fixtures

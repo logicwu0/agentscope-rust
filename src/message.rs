@@ -4,6 +4,7 @@ mod content;
 mod data;
 mod msg;
 mod role;
+mod structured_output;
 mod thinking;
 mod tool_call;
 mod tool_result;
@@ -16,6 +17,7 @@ pub use content::{ContentBlock, TextBlock};
 pub use data::{Base64Source, DataBlock, DataBlockError, DataSource, UrlSource};
 pub use msg::Msg;
 pub use role::Role;
+pub use structured_output::{StructuredOutputBlock, StructuredOutputError, StructuredOutputState};
 pub use thinking::{ThinkingBlock, ThinkingBlockError};
 pub use tool_call::{
     PermissionBehavior, PermissionRule, ToolCallBlock, ToolCallError, ToolCallState,

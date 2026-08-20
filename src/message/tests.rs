@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 
 use super::{
     ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg, PermissionBehavior,
-    PermissionRule, Role, ThinkingBlock, ThinkingBlockError, ToolCallBlock, ToolCallError,
-    ToolCallState, ToolResultBlock, ToolResultContent, ToolResultError, ToolResultOutput,
-    ToolResultState,
+    PermissionRule, Role, StructuredOutputBlock, StructuredOutputError, StructuredOutputState,
+    ThinkingBlock, ThinkingBlockError, ToolCallBlock, ToolCallError, ToolCallState,
+    ToolResultBlock, ToolResultContent, ToolResultError, ToolResultOutput, ToolResultState,
 };
 
 #[test]
@@ -534,4 +534,112 @@ fn text_content_excludes_tool_results() {
         message.text_content("\n").as_deref(),
         Some("Here is the answer.")
     );
+}
+
+#[test]
+fn structured_output_states_use_wire_values() {
+    for (state, expected) in [
+        (StructuredOutputState::Streaming, "streaming"),
+        (StructuredOutputState::Complete, "complete"),
+    ] {
+        assert_eq!(serde_json::to_value(state).unwrap(), expected);
+        assert_eq!(state.to_string(), expected);
+    }
+}
+
+#[test]
+fn streaming_structured_output_accepts_partial_json() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"]
+    });
+    let mut block = StructuredOutputBlock::streaming(schema).unwrap();
+    block.append_output_delta("{\"city\":\"").unwrap();
+    assert!(matches!(
+        block.parsed_output(),
+        Err(StructuredOutputError::InvalidOutput(_))
+    ));
+
+    block.append_output_delta("Hangzhou\"}").unwrap();
+    block.finish().unwrap();
+
+    assert_eq!(block.state(), StructuredOutputState::Complete);
+    assert_eq!(block.parsed_output().unwrap(), json!({"city": "Hangzhou"}));
+    assert!(block.finished_at.is_some());
+}
+
+#[test]
+fn complete_structured_output_uses_wire_format() {
+    let schema = json!({"type": "array", "items": {"type": "integer"}});
+    let block = StructuredOutputBlock::complete(schema.clone(), json!([1, 2, 3])).unwrap();
+    let value = serde_json::to_value(ContentBlock::from(block.clone())).unwrap();
+
+    assert_eq!(value["type"], "structured_output");
+    assert_eq!(value["schema"], schema);
+    assert_eq!(value["output"], "[1,2,3]");
+    assert_eq!(value["state"], "complete");
+    assert_eq!(block.schema(), &schema);
+    assert_eq!(block.raw_output(), "[1,2,3]");
+
+    let restored: ContentBlock = serde_json::from_value(value).unwrap();
+    assert_eq!(restored, ContentBlock::from(block));
+}
+
+#[test]
+fn structured_output_rejects_invalid_schema_roots() {
+    for schema in [json!(null), json!("object"), json!(["object"])] {
+        assert!(matches!(
+            StructuredOutputBlock::streaming(schema),
+            Err(StructuredOutputError::InvalidSchema)
+        ));
+    }
+
+    assert!(StructuredOutputBlock::streaming(json!(true)).is_ok());
+    assert!(StructuredOutputBlock::streaming(json!(false)).is_ok());
+}
+
+#[test]
+fn completed_structured_output_requires_valid_json() {
+    let value = json!({
+        "type": "structured_output",
+        "schema": {"type": "object"},
+        "output": "{",
+        "state": "complete",
+        "id": "block-1",
+        "created_at": "2026-08-20T12:00:00.000000",
+        "finished_at": "2026-08-20T12:00:01.000000"
+    });
+
+    assert!(serde_json::from_value::<ContentBlock>(value).is_err());
+}
+
+#[test]
+fn completed_structured_output_is_immutable() {
+    let mut block = StructuredOutputBlock::complete(json!({}), json!({"ok": true})).unwrap();
+
+    assert!(matches!(
+        block.append_output_delta(" "),
+        Err(StructuredOutputError::AlreadyComplete)
+    ));
+    assert!(matches!(
+        block.finish(),
+        Err(StructuredOutputError::AlreadyComplete)
+    ));
+}
+
+#[test]
+fn text_content_excludes_structured_output() {
+    let message = Msg::new(
+        "Friday",
+        Role::Assistant,
+        [
+            ContentBlock::from(
+                StructuredOutputBlock::complete(json!({}), json!({"answer": 42})).unwrap(),
+            ),
+            ContentBlock::from("Done"),
+        ],
+    );
+
+    assert_eq!(message.text_content("\n").as_deref(), Some("Done"));
 }

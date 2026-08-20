@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DataBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock, generate_id, generate_timestamp,
+    DataBlock, StructuredOutputBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock, generate_id,
+    generate_timestamp,
 };
 
 /// A plain-text message content block.
@@ -48,6 +49,8 @@ pub enum ContentBlock {
     ToolCall(ToolCallBlock),
     /// Output produced by a tool invocation.
     ToolResult(ToolResultBlock),
+    /// JSON output produced according to a requested schema.
+    StructuredOutput(StructuredOutputBlock),
     /// Binary or multimodal data.
     Data(DataBlock),
 }
@@ -58,7 +61,11 @@ impl ContentBlock {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(block) => Some(block.text.as_str()),
-            Self::Thinking(_) | Self::ToolCall(_) | Self::ToolResult(_) | Self::Data(_) => None,
+            Self::Thinking(_)
+            | Self::ToolCall(_)
+            | Self::ToolResult(_)
+            | Self::StructuredOutput(_)
+            | Self::Data(_) => None,
         }
     }
 }
@@ -84,6 +91,12 @@ impl From<ToolCallBlock> for ContentBlock {
 impl From<ToolResultBlock> for ContentBlock {
     fn from(block: ToolResultBlock) -> Self {
         Self::ToolResult(block)
+    }
+}
+
+impl From<StructuredOutputBlock> for ContentBlock {
+    fn from(block: StructuredOutputBlock) -> Self {
+        Self::StructuredOutput(block)
     }
 }
 

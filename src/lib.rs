@@ -6,9 +6,10 @@ pub mod message;
 
 pub use message::{
     Base64Source, ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg,
-    PermissionBehavior, PermissionRule, Role, TextBlock, ThinkingBlock, ThinkingBlockError,
-    ToolCallBlock, ToolCallError, ToolCallState, ToolResultBlock, ToolResultContent,
-    ToolResultError, ToolResultOutput, ToolResultState, UrlSource,
+    PermissionBehavior, PermissionRule, Role, StructuredOutputBlock, StructuredOutputError,
+    StructuredOutputState, TextBlock, ThinkingBlock, ThinkingBlockError, ToolCallBlock,
+    ToolCallError, ToolCallState, ToolResultBlock, ToolResultContent, ToolResultError,
+    ToolResultOutput, ToolResultState, UrlSource,
 };
 
 /// The current crate version.
