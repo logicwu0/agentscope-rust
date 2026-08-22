@@ -37,8 +37,9 @@ behavioral compatibility will be evaluated feature by feature.
 The project foundation and continuous integration are in place. The public API
 now provides roles, text, thinking, validated multimodal data blocks,
 streaming-aware tool calls, multimodal tool results, and streaming structured
-JSON output blocks, token usage accounting, and provider-neutral chat model
-responses. Streaming event types are next.
+JSON output blocks, token usage accounting, provider-neutral chat model
+responses, and deterministic streaming event accumulation. The asynchronous
+chat model interface is next.
 
 ```rust
 // Target API direction — illustrative only, not implemented yet.
@@ -78,7 +79,7 @@ after they have been exercised by working examples.
 - [x] Define structured-output blocks
 - [x] Introduce a provider-neutral token usage type
 - [x] Define shared chat response and finish reason types
-- [ ] Introduce shared error and streaming event types
+- [x] Define model errors and streaming event types
 - [ ] Define object state snapshot and restore conventions
 - [ ] Add JSON serialization and compatibility fixtures
 

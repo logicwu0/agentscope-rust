@@ -5,7 +5,9 @@
 pub mod message;
 pub mod model;
 
-pub use model::{ChatResponse, FinishReason};
+pub use model::{
+    ChatEvent, ChatResponse, ChatResponseAccumulator, ChatStreamError, FinishReason, ModelError,
+};
 
 pub use message::{
     Base64Source, ContentBlock, DataBlock, DataBlockError, DataSource, Metadata, Msg,
