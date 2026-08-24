@@ -1,9 +1,15 @@
 //! Model response tests.
 
+use std::sync::Arc;
+
+use futures_executor::block_on;
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 
 use super::{
-    ChatEvent, ChatResponse, ChatResponseAccumulator, ChatStreamError, FinishReason, ModelError,
+    ChatEvent, ChatModel, ChatRequest, ChatRequestError, ChatResponse, ChatResponseAccumulator,
+    ChatStreamError, FinishReason, GenerateOptions, MockChatModel, ModelCapabilities,
+    ModelCapability, ModelError, ToolDefinition,
 };
 use crate::message::{
     ContentBlock, Metadata, Role, StructuredOutputState, ThinkingBlock, ToolCallBlock,
@@ -428,4 +434,172 @@ fn model_error_event_round_trips() {
         "model error unavailable: temporarily unavailable"
     );
     assert_eq!(serde_json::from_value::<ChatEvent>(value).unwrap(), event);
+}
+
+#[test]
+fn chat_request_round_trips_with_options_tools_and_schema() {
+    let mut extra = Metadata::new();
+    extra.insert("provider_flag".into(), json!(true));
+    let options = GenerateOptions::new()
+        .with_temperature(0.2)
+        .with_max_tokens(512)
+        .with_top_p(0.9)
+        .with_seed(42)
+        .with_stop(["END"])
+        .with_extra(extra);
+    let tool = ToolDefinition::new(
+        "weather",
+        "Get current weather",
+        json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+        }),
+    )
+    .unwrap();
+    let original = ChatRequest::new([crate::message::Msg::user("Weather?")])
+        .with_options(options)
+        .with_tools([tool])
+        .with_structured_output_schema(json!({"type": "object"}))
+        .unwrap();
+
+    let value = serde_json::to_value(&original).unwrap();
+    assert_eq!(value["options"]["temperature"], 0.2);
+    assert_eq!(value["options"]["max_tokens"], 512);
+    assert_eq!(value["tools"][0]["name"], "weather");
+    assert_eq!(value["structured_output_schema"]["type"], "object");
+    assert_eq!(
+        serde_json::from_value::<ChatRequest>(value).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn request_builders_reject_invalid_tool_and_output_schemas() {
+    assert_eq!(
+        ToolDefinition::new("  ", "invalid", json!({})).unwrap_err(),
+        ChatRequestError::EmptyToolName
+    );
+    assert_eq!(
+        ToolDefinition::new("tool", "invalid", json!(null)).unwrap_err(),
+        ChatRequestError::InvalidSchema
+    );
+    assert_eq!(
+        ChatRequest::new([])
+            .with_structured_output_schema(json!([]))
+            .unwrap_err(),
+        ChatRequestError::InvalidSchema
+    );
+    assert!(
+        serde_json::from_value::<ToolDefinition>(json!({
+            "name": "",
+            "description": "invalid",
+            "input_schema": {}
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ChatRequest>(json!({
+            "messages": [],
+            "structured_output_schema": []
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn model_capabilities_are_extensible_and_serializable() {
+    let capabilities = ModelCapabilities::new()
+        .with(ModelCapability::Streaming, true)
+        .with(ModelCapability::ToolCalls, true)
+        .with(ModelCapability::Streaming, false);
+
+    assert!(!capabilities.supports(ModelCapability::Streaming));
+    assert!(capabilities.supports(ModelCapability::ToolCalls));
+    assert_eq!(
+        capabilities.iter().collect::<Vec<_>>(),
+        [ModelCapability::ToolCalls]
+    );
+    assert_eq!(
+        serde_json::to_value(capabilities).unwrap(),
+        json!(["tool_calls"])
+    );
+}
+
+#[test]
+fn mock_model_supports_object_safe_complete_generation() {
+    let mock = Arc::new(
+        MockChatModel::new("mock-1")
+            .with_response(ChatResponse::completed([ContentBlock::from("First")]))
+            .with_response(ChatResponse::completed([ContentBlock::from("Second")])),
+    );
+    let model: Arc<dyn ChatModel> = mock.clone();
+    let first_request = ChatRequest::new([crate::message::Msg::user("one")]);
+    let second_request = ChatRequest::new([crate::message::Msg::user("two")]);
+
+    let first = block_on(model.generate(first_request.clone())).unwrap();
+    let second = block_on(model.generate(second_request.clone())).unwrap();
+
+    assert_eq!(model.name(), "mock-1");
+    assert!(
+        model
+            .capabilities()
+            .supports(ModelCapability::StructuredOutput)
+    );
+    assert_eq!(first.text_content("\n").as_deref(), Some("First"));
+    assert_eq!(second.text_content("\n").as_deref(), Some("Second"));
+    assert_eq!(mock.recorded_requests(), [first_request, second_request]);
+}
+
+#[test]
+fn mock_model_streams_scripted_events_through_trait_object() {
+    let scripted = vec![
+        Ok(ChatEvent::TextDelta {
+            block_id: "text-1".into(),
+            delta: "Hello".into(),
+        }),
+        Ok(ChatEvent::Usage {
+            usage: Usage::new(10, 2),
+        }),
+        Ok(ChatEvent::Finished {
+            reason: FinishReason::Completed,
+        }),
+    ];
+    let mock = Arc::new(MockChatModel::new("mock-stream").with_stream(scripted.clone()));
+    let model: Arc<dyn ChatModel> = mock.clone();
+
+    let stream = block_on(model.stream(ChatRequest::new([]))).unwrap();
+    let events = block_on(stream.collect::<Vec<_>>());
+
+    assert_eq!(events, scripted);
+    assert_eq!(mock.recorded_requests().len(), 1);
+}
+
+#[test]
+fn mock_model_preserves_start_and_midstream_failures() {
+    let start_error = ModelError::new("cannot connect").with_retryable(true);
+    let midstream_error = ModelError::new("connection lost").with_code("disconnected");
+    let mock = MockChatModel::new("mock-errors")
+        .with_stream_error(start_error.clone())
+        .with_stream([Err(midstream_error.clone())]);
+
+    let Err(actual_start_error) = block_on(mock.stream(ChatRequest::new([]))) else {
+        panic!("expected stream start error");
+    };
+    assert_eq!(actual_start_error, start_error);
+    let stream = block_on(mock.stream(ChatRequest::new([]))).unwrap();
+    let events = block_on(stream.collect::<Vec<_>>());
+    assert_eq!(events, [Err(midstream_error)]);
+}
+
+#[test]
+fn exhausted_mock_returns_a_model_error() {
+    let mock = MockChatModel::new("empty");
+
+    let error = block_on(mock.generate(ChatRequest::new([]))).unwrap_err();
+    assert_eq!(
+        error.message,
+        "mock has no scripted complete response remaining"
+    );
+    assert!(!error.retryable);
 }

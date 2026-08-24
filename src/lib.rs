@@ -6,7 +6,9 @@ pub mod message;
 pub mod model;
 
 pub use model::{
-    ChatEvent, ChatResponse, ChatResponseAccumulator, ChatStreamError, FinishReason, ModelError,
+    ChatEvent, ChatEventStream, ChatModel, ChatRequest, ChatRequestError, ChatResponse,
+    ChatResponseAccumulator, ChatStreamError, FinishReason, GenerateOptions, MockChatModel,
+    ModelCapabilities, ModelCapability, ModelError, ModelFuture, ModelResult, ToolDefinition,
 };
 
 pub use message::{

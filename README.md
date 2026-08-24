@@ -38,8 +38,9 @@ The project foundation and continuous integration are in place. The public API
 now provides roles, text, thinking, validated multimodal data blocks,
 streaming-aware tool calls, multimodal tool results, and streaming structured
 JSON output blocks, token usage accounting, provider-neutral chat model
-responses, and deterministic streaming event accumulation. The asynchronous
-chat model interface is next.
+responses, deterministic streaming event accumulation, and an object-safe
+asynchronous chat model interface with a deterministic mock. An OpenAI-compatible
+model implementation is next.
 
 ```rust
 // Target API direction — illustrative only, not implemented yet.
@@ -85,12 +86,12 @@ after they have been exercised by working examples.
 
 ### Milestone 2 — Model Layer
 
-- [ ] Define a provider-neutral asynchronous `ChatModel` trait
+- [x] Define a provider-neutral asynchronous `ChatModel` trait
 - [ ] Implement an OpenAI-compatible chat model
 - [ ] Support streaming responses and token usage
 - [ ] Support tool calling and structured output
 - [ ] Add cancellation, timeout, retry, and rate-limit handling
-- [ ] Add mock models for deterministic tests
+- [x] Add mock models for deterministic tests
 
 ### Milestone 3 — Tools
 
