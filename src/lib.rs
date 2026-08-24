@@ -8,7 +8,8 @@ pub mod model;
 pub use model::{
     ChatEvent, ChatEventStream, ChatModel, ChatRequest, ChatRequestError, ChatResponse,
     ChatResponseAccumulator, ChatStreamError, FinishReason, GenerateOptions, MockChatModel,
-    ModelCapabilities, ModelCapability, ModelError, ModelFuture, ModelResult, ToolDefinition,
+    ModelCapabilities, ModelCapability, ModelError, ModelFuture, ModelResult, OpenAIChatModel,
+    OpenAIChatModelBuilder, OpenAIConfigError, ToolDefinition,
 };
 
 pub use message::{

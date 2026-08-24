@@ -32,18 +32,41 @@ behavioral compatibility will be evaluated feature by feature.
 
 ## Current Status
 
-**Milestone 1 — core types**
+**Milestone 2 — model layer**
 
 The project foundation and continuous integration are in place. The public API
 now provides roles, text, thinking, validated multimodal data blocks,
 streaming-aware tool calls, multimodal tool results, and streaming structured
 JSON output blocks, token usage accounting, provider-neutral chat model
 responses, deterministic streaming event accumulation, and an object-safe
-asynchronous chat model interface with a deterministic mock. An OpenAI-compatible
-model implementation is next.
+asynchronous chat model interface with a deterministic mock. A non-streaming
+`OpenAIChatModel` can now call OpenAI-compatible chat-completions APIs, including
+DeepSeek, with tool calls, structured output, token usage, timeouts, and
+structured provider errors.
 
 ```rust
-// Target API direction — illustrative only, not implemented yet.
+use agentscope::{ChatModel, ChatRequest, Msg, OpenAIChatModel};
+
+let model = OpenAIChatModel::builder()
+    .model("deepseek-chat")
+    .api_key_from_env("DEEPSEEK_API_KEY")?
+    .base_url("https://api.deepseek.com")
+    .build()?;
+
+let response = model
+    .generate(ChatRequest::new([Msg::user("Hello")]))
+    .await?;
+```
+
+Run the complete example without putting the key in source code or a committed
+configuration file:
+
+```shell
+DEEPSEEK_API_KEY='your-key' cargo run --example deepseek
+```
+
+```rust
+// Target agent API direction — illustrative only, not implemented yet.
 let agent = ReActAgent::builder()
     .name("Friday")
     .model(OpenAIChatModel::from_env("qwen-plus")?)
@@ -87,9 +110,10 @@ after they have been exercised by working examples.
 ### Milestone 2 — Model Layer
 
 - [x] Define a provider-neutral asynchronous `ChatModel` trait
-- [ ] Implement an OpenAI-compatible chat model
-- [ ] Support streaming responses and token usage
-- [ ] Support tool calling and structured output
+- [x] Implement a non-streaming OpenAI-compatible chat model
+- [ ] Support streaming responses
+- [x] Map provider token usage
+- [x] Support tool calling and structured output
 - [ ] Add cancellation, timeout, retry, and rate-limit handling
 - [x] Add mock models for deterministic tests
 

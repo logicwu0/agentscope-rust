@@ -30,15 +30,37 @@ Python API。
 
 ## 当前状态
 
-**里程碑 1——核心类型**
+**里程碑 2——模型层**
 
 工程基础和持续集成已经就绪。公开 API 已实现角色、文本、思考、经过校验的多模态
 数据块、支持流式参数的工具调用、多模态工具结果、流式结构化 JSON 输出块、
 Token 用量统计、与供应商无关的对话模型响应、确定性的流式事件聚合、可作为 trait
-对象使用的异步对话模型接口以及确定性 Mock；下一步将实现 OpenAI 兼容模型。
+对象使用的异步对话模型接口以及确定性 Mock。非流式 `OpenAIChatModel` 现已能够调用
+包括 DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持工具调用、结构化输出、
+Token 用量、超时和结构化供应商错误。
 
 ```rust
-// 目标 API 方向——仅作示意，目前尚未实现。
+use agentscope::{ChatModel, ChatRequest, Msg, OpenAIChatModel};
+
+let model = OpenAIChatModel::builder()
+    .model("deepseek-chat")
+    .api_key_from_env("DEEPSEEK_API_KEY")?
+    .base_url("https://api.deepseek.com")
+    .build()?;
+
+let response = model
+    .generate(ChatRequest::new([Msg::user("你好")]))
+    .await?;
+```
+
+无需将 Key 写入源码或提交的配置文件，即可运行完整示例：
+
+```shell
+DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek
+```
+
+```rust
+// 目标 Agent API 方向——仅作示意，目前尚未实现。
 let agent = ReActAgent::builder()
     .name("Friday")
     .model(OpenAIChatModel::from_env("qwen-plus")?)
@@ -81,9 +103,10 @@ let reply = agent
 ### 里程碑 2——模型层
 
 - [x] 定义与供应商无关的异步 `ChatModel` trait
-- [ ] 实现 OpenAI 兼容的对话模型
-- [ ] 支持流式响应和 Token 用量统计
-- [ ] 支持工具调用和结构化输出
+- [x] 实现非流式 OpenAI 兼容对话模型
+- [ ] 支持流式响应
+- [x] 映射供应商 Token 用量统计
+- [x] 支持工具调用和结构化输出
 - [ ] 支持取消、超时、重试和限流处理
 - [x] 添加用于确定性测试的模拟模型
 
