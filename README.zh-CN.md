@@ -35,9 +35,10 @@ Python API。
 工程基础和持续集成已经就绪。公开 API 已实现角色、文本、思考、经过校验的多模态
 数据块、支持流式参数的工具调用、多模态工具结果、流式结构化 JSON 输出块、
 Token 用量统计、与供应商无关的对话模型响应、确定性的流式事件聚合、可作为 trait
-对象使用的异步对话模型接口以及确定性 Mock。非流式 `OpenAIChatModel` 现已能够调用
-包括 DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持工具调用、结构化输出、
-Token 用量、超时和结构化供应商错误。
+对象使用的异步对话模型接口以及确定性 Mock。`OpenAIChatModel` 现已能够调用包括
+DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响应、工具调用、
+结构化输出、Token 用量、超时和结构化供应商错误。SSE 解码器可处理任意 HTTP 分片
+边界以及供应商返回的流内错误。
 
 ```rust
 use agentscope::{ChatModel, ChatRequest, Msg, OpenAIChatModel};
@@ -57,6 +58,7 @@ let response = model
 
 ```shell
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek
+DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_stream
 ```
 
 ```rust
@@ -103,8 +105,8 @@ let reply = agent
 ### 里程碑 2——模型层
 
 - [x] 定义与供应商无关的异步 `ChatModel` trait
-- [x] 实现非流式 OpenAI 兼容对话模型
-- [ ] 支持流式响应
+- [x] 实现 OpenAI 兼容对话模型
+- [x] 支持 SSE 流式响应
 - [x] 映射供应商 Token 用量统计
 - [x] 支持工具调用和结构化输出
 - [ ] 支持取消、超时、重试和限流处理

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -8,8 +9,8 @@ use tokio::{
 };
 
 use crate::{
-    ChatModel, ChatRequest, ContentBlock, FinishReason, GenerateOptions, ModelCapability, Msg,
-    OpenAIChatModel, ToolDefinition,
+    ChatModel, ChatRequest, ChatResponseAccumulator, ContentBlock, FinishReason, GenerateOptions,
+    ModelCapability, Msg, OpenAIChatModel, ToolDefinition,
 };
 
 use super::wire;
@@ -24,13 +25,13 @@ fn debug_output_redacts_api_key() {
 }
 
 #[test]
-fn capabilities_match_non_streaming_mvp() {
+fn capabilities_match_streaming_mvp() {
     let model = OpenAIChatModel::new("test-model", "secret").unwrap();
     let capabilities = model.capabilities();
 
     assert!(capabilities.supports(ModelCapability::ToolCalls));
     assert!(capabilities.supports(ModelCapability::StructuredOutput));
-    assert!(!capabilities.supports(ModelCapability::Streaming));
+    assert!(capabilities.supports(ModelCapability::Streaming));
     assert!(!capabilities.supports(ModelCapability::MultimodalInput));
 }
 
@@ -62,7 +63,7 @@ fn request_encodes_options_tools_and_structured_output() {
         .with_structured_output_schema(schema)
         .unwrap();
 
-    let body = wire::encode_request("test-model", &request).unwrap();
+    let body = wire::encode_request("test-model", &request, false).unwrap();
 
     assert_eq!(body["model"], "test-model");
     assert_eq!(body["messages"][0]["role"], "system");
@@ -70,6 +71,25 @@ fn request_encodes_options_tools_and_structured_output() {
     assert_eq!(body["temperature"], 0.2);
     assert_eq!(body["tools"][0]["function"]["name"], "weather");
     assert_eq!(body["response_format"]["type"], "json_schema");
+}
+
+#[test]
+fn streaming_request_asks_provider_for_usage() {
+    let request = ChatRequest::new([Msg::user("Hello")]);
+
+    let body = wire::encode_request("test-model", &request, true).unwrap();
+
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"]["include_usage"], true);
+}
+
+#[test]
+fn provider_resource_interruption_maps_to_interrupted_finish() {
+    let value = Value::String("insufficient_system_resource".to_owned());
+
+    let reason = wire::decode_finish_reason(Some(&value)).unwrap();
+
+    assert_eq!(reason, FinishReason::Interrupted);
 }
 
 #[test]
@@ -176,6 +196,98 @@ async fn rate_limit_error_is_retryable_and_preserves_provider_code() {
     assert!(error.retryable);
 }
 
+#[tokio::test]
+async fn stream_decodes_split_utf8_text_reasoning_usage_and_finish() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"想\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"你\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let split = body
+        .windows("你".len())
+        .position(|window| window == "你".as_bytes())
+        .unwrap()
+        + 1;
+    let chunks = vec![body[..split].to_vec(), body[split..].to_vec()];
+    let (base_url, request_rx) = serve_sse_once(chunks).await;
+    let model = local_model(base_url);
+
+    let mut stream = model
+        .stream(ChatRequest::new([Msg::user("你好")]))
+        .await
+        .unwrap();
+    let mut accumulator = ChatResponseAccumulator::new();
+    while let Some(event) = stream.next().await {
+        accumulator.apply(event.unwrap()).unwrap();
+    }
+    let response = accumulator.into_response().unwrap();
+    let received = request_rx.await.unwrap();
+
+    assert_eq!(response.text_content(""), Some("你好".to_owned()));
+    assert!(matches!(response.content[0], ContentBlock::Thinking(_)));
+    assert_eq!(response.usage.unwrap().total_tokens(), 6);
+    assert_eq!(response.finish_reason, Some(FinishReason::Completed));
+    let request: Value = serde_json::from_str(received.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(request["stream"], true);
+    assert_eq!(request["stream_options"]["include_usage"], true);
+}
+
+#[tokio::test]
+async fn stream_reassembles_incremental_tool_arguments() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"杭州\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let (base_url, _) = serve_sse_once(vec![body.as_bytes().to_vec()]).await;
+    let model = local_model(base_url);
+
+    let mut stream = model
+        .stream(ChatRequest::new([Msg::user("杭州天气")]))
+        .await
+        .unwrap();
+    let mut accumulator = ChatResponseAccumulator::new();
+    while let Some(event) = stream.next().await {
+        accumulator.apply(event.unwrap()).unwrap();
+    }
+    let response = accumulator.into_response().unwrap();
+
+    assert_eq!(response.finish_reason, Some(FinishReason::ToolCalls));
+    let tool_call = response.tool_calls().next().unwrap();
+    assert_eq!(tool_call.id(), "call-1");
+    assert_eq!(tool_call.name(), "weather");
+    assert_eq!(tool_call.parsed_input().unwrap(), json!({"city": "杭州"}));
+}
+
+#[tokio::test]
+async fn stream_reports_invalid_sse_data() {
+    let (base_url, _) = serve_sse_once(vec![b"data: not-json\n\n".to_vec()]).await;
+    let model = local_model(base_url);
+
+    let mut stream = model
+        .stream(ChatRequest::new([Msg::user("Hello")]))
+        .await
+        .unwrap();
+    let error = stream.next().await.unwrap().unwrap_err();
+
+    assert_eq!(error.code.as_deref(), Some("invalid_stream"));
+}
+
+fn local_model(base_url: String) -> OpenAIChatModel {
+    OpenAIChatModel::builder()
+        .model("deepseek-chat")
+        .api_key("local-test-key")
+        .base_url(base_url)
+        .build()
+        .unwrap()
+}
+
 async fn serve_once(status: u16, response: Value) -> (String, oneshot::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -194,6 +306,33 @@ async fn serve_once(status: u16, response: Value) -> (String, oneshot::Receiver<
             body.len()
         );
         socket.write_all(reply.as_bytes()).await.unwrap();
+        request_tx.send(request).ok();
+    });
+    (format!("http://{address}"), request_rx)
+}
+
+async fn serve_sse_once(chunks: Vec<Vec<u8>>) -> (String, oneshot::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_tx, request_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut socket).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        for chunk in chunks {
+            socket
+                .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(&chunk).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+        }
+        socket.write_all(b"0\r\n\r\n").await.unwrap();
         request_tx.send(request).ok();
     });
     (format!("http://{address}"), request_rx)

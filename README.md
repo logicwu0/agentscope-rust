@@ -39,10 +39,11 @@ now provides roles, text, thinking, validated multimodal data blocks,
 streaming-aware tool calls, multimodal tool results, and streaming structured
 JSON output blocks, token usage accounting, provider-neutral chat model
 responses, deterministic streaming event accumulation, and an object-safe
-asynchronous chat model interface with a deterministic mock. A non-streaming
-`OpenAIChatModel` can now call OpenAI-compatible chat-completions APIs, including
+asynchronous chat model interface with a deterministic mock. `OpenAIChatModel`
+can now call and stream from OpenAI-compatible chat-completions APIs, including
 DeepSeek, with tool calls, structured output, token usage, timeouts, and
-structured provider errors.
+structured provider errors. The SSE decoder handles arbitrary HTTP chunk
+boundaries and provider-side stream errors.
 
 ```rust
 use agentscope::{ChatModel, ChatRequest, Msg, OpenAIChatModel};
@@ -63,6 +64,7 @@ configuration file:
 
 ```shell
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek
+DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_stream
 ```
 
 ```rust
@@ -110,8 +112,8 @@ after they have been exercised by working examples.
 ### Milestone 2 — Model Layer
 
 - [x] Define a provider-neutral asynchronous `ChatModel` trait
-- [x] Implement a non-streaming OpenAI-compatible chat model
-- [ ] Support streaming responses
+- [x] Implement an OpenAI-compatible chat model
+- [x] Support SSE streaming responses
 - [x] Map provider token usage
 - [x] Support tool calling and structured output
 - [ ] Add cancellation, timeout, retry, and rate-limit handling

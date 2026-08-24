@@ -1,5 +1,6 @@
 //! OpenAI-compatible chat-completions client.
 
+mod sse;
 mod wire;
 
 use std::{env, fmt, time::Duration};
@@ -12,7 +13,7 @@ use super::{
     ModelError, ModelFuture,
 };
 
-/// A non-streaming client for OpenAI-compatible chat-completions APIs.
+/// A streaming-capable client for OpenAI-compatible chat-completions APIs.
 #[derive(Clone)]
 pub struct OpenAIChatModel {
     model: String,
@@ -73,13 +74,14 @@ impl ChatModel for OpenAIChatModel {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities::new()
+            .with(ModelCapability::Streaming, true)
             .with(ModelCapability::ToolCalls, true)
             .with(ModelCapability::StructuredOutput, true)
     }
 
     fn generate(&self, request: ChatRequest) -> ModelFuture<'_, ChatResponse> {
         Box::pin(async move {
-            let body = wire::encode_request(&self.model, &request)?;
+            let body = wire::encode_request(&self.model, &request, false)?;
             let response = self
                 .client
                 .post(self.endpoint.clone())
@@ -103,12 +105,28 @@ impl ChatModel for OpenAIChatModel {
         })
     }
 
-    fn stream(&self, _request: ChatRequest) -> ModelFuture<'_, ChatEventStream<'_>> {
-        Box::pin(async {
-            Err(
-                ModelError::new("streaming is not implemented for OpenAIChatModel")
-                    .with_code("unsupported_capability"),
-            )
+    fn stream(&self, request: ChatRequest) -> ModelFuture<'_, ChatEventStream<'_>> {
+        Box::pin(async move {
+            let body = wire::encode_request(&self.model, &request, true)?;
+            let response = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.api_key.expose())
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| transport_error(&error))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.json::<Value>().await.ok();
+                return Err(provider_error(status, body.as_ref()));
+            }
+
+            Ok(sse::decode_stream(
+                response,
+                request.structured_output_schema,
+            ))
         })
     }
 }

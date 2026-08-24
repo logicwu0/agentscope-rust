@@ -9,10 +9,11 @@ use crate::message::{
 
 use super::super::{ChatRequest, ChatResponse, FinishReason, ModelError};
 
-const RESERVED_REQUEST_FIELDS: [&str; 10] = [
+const RESERVED_REQUEST_FIELDS: [&str; 11] = [
     "model",
     "messages",
     "stream",
+    "stream_options",
     "tools",
     "response_format",
     "temperature",
@@ -22,10 +23,17 @@ const RESERVED_REQUEST_FIELDS: [&str; 10] = [
     "stop",
 ];
 
-pub(super) fn encode_request(model: &str, request: &ChatRequest) -> Result<Value, ModelError> {
+pub(super) fn encode_request(
+    model: &str,
+    request: &ChatRequest,
+    streaming: bool,
+) -> Result<Value, ModelError> {
     let mut body = Map::new();
     body.insert("model".to_owned(), Value::String(model.to_owned()));
-    body.insert("stream".to_owned(), Value::Bool(false));
+    body.insert("stream".to_owned(), Value::Bool(streaming));
+    if streaming {
+        body.insert("stream_options".to_owned(), json!({"include_usage": true}));
+    }
     body.insert(
         "messages".to_owned(),
         Value::Array(encode_messages(&request.messages)?),
@@ -243,18 +251,19 @@ fn decode_tool_call(value: &Value) -> Result<ToolCallBlock, ModelError> {
         .map_err(|error| invalid_response(format!("invalid tool call: {error}")))
 }
 
-fn decode_finish_reason(value: Option<&Value>) -> Result<FinishReason, ModelError> {
+pub(super) fn decode_finish_reason(value: Option<&Value>) -> Result<FinishReason, ModelError> {
     match value.and_then(Value::as_str) {
         Some("stop") => Ok(FinishReason::Completed),
         Some("length") => Ok(FinishReason::Length),
         Some("tool_calls" | "function_call") => Ok(FinishReason::ToolCalls),
         Some("content_filter") => Ok(FinishReason::ContentFilter),
+        Some("insufficient_system_resource") => Ok(FinishReason::Interrupted),
         Some(other) => Err(invalid_response(format!("unknown finish reason `{other}`"))),
         None => Err(invalid_response("choice did not contain a finish reason")),
     }
 }
 
-fn decode_usage(value: &Value) -> Result<Usage, ModelError> {
+pub(super) fn decode_usage(value: &Value) -> Result<Usage, ModelError> {
     let usage = value
         .as_object()
         .ok_or_else(|| invalid_response("usage must be an object"))?;
