@@ -46,12 +46,19 @@ structured provider errors. The SSE decoder handles arbitrary HTTP chunk
 boundaries and provider-side stream errors.
 
 ```rust
-use agentscope::{ChatModel, ChatRequest, Msg, OpenAIChatModel};
+use std::time::Duration;
+
+use agentscope::{ChatModel, ChatRequest, Msg, OpenAIChatModel, RetryPolicy};
 
 let model = OpenAIChatModel::builder()
     .model("deepseek-chat")
     .api_key_from_env("DEEPSEEK_API_KEY")?
     .base_url("https://api.deepseek.com")
+    .retry_policy(
+        RetryPolicy::new(2)
+            .with_initial_delay(Duration::from_millis(250))
+            .with_max_delay(Duration::from_secs(10)),
+    )
     .build()?;
 
 let response = model
@@ -116,7 +123,8 @@ after they have been exercised by working examples.
 - [x] Support SSE streaming responses
 - [x] Map provider token usage
 - [x] Support tool calling and structured output
-- [ ] Add cancellation, timeout, retry, and rate-limit handling
+- [x] Add request timeouts, exponential retries, and `Retry-After` handling
+- [ ] Add explicit cancellation support
 - [x] Add mock models for deterministic tests
 
 ### Milestone 3 — Tools

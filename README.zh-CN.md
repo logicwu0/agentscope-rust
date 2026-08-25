@@ -41,12 +41,19 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 边界以及供应商返回的流内错误。
 
 ```rust
-use agentscope::{ChatModel, ChatRequest, Msg, OpenAIChatModel};
+use std::time::Duration;
+
+use agentscope::{ChatModel, ChatRequest, Msg, OpenAIChatModel, RetryPolicy};
 
 let model = OpenAIChatModel::builder()
     .model("deepseek-chat")
     .api_key_from_env("DEEPSEEK_API_KEY")?
     .base_url("https://api.deepseek.com")
+    .retry_policy(
+        RetryPolicy::new(2)
+            .with_initial_delay(Duration::from_millis(250))
+            .with_max_delay(Duration::from_secs(10)),
+    )
     .build()?;
 
 let response = model
@@ -109,7 +116,8 @@ let reply = agent
 - [x] 支持 SSE 流式响应
 - [x] 映射供应商 Token 用量统计
 - [x] 支持工具调用和结构化输出
-- [ ] 支持取消、超时、重试和限流处理
+- [x] 支持请求超时、指数退避重试和 `Retry-After`
+- [ ] 支持显式取消
 - [x] 添加用于确定性测试的模拟模型
 
 ### 里程碑 3——工具系统

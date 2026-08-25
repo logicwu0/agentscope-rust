@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -10,7 +10,7 @@ use tokio::{
 
 use crate::{
     ChatModel, ChatRequest, ChatResponseAccumulator, ContentBlock, FinishReason, GenerateOptions,
-    ModelCapability, Msg, OpenAIChatModel, ToolDefinition,
+    ModelCapability, Msg, OpenAIChatModel, RetryPolicy, ToolDefinition,
 };
 
 use super::wire;
@@ -183,6 +183,7 @@ async fn rate_limit_error_is_retryable_and_preserves_provider_code() {
         .model("test-model")
         .api_key("secret")
         .base_url(base_url)
+        .retry_policy(RetryPolicy::disabled())
         .build()
         .unwrap();
 
@@ -194,6 +195,71 @@ async fn rate_limit_error_is_retryable_and_preserves_provider_code() {
     assert_eq!(error.message, "slow down");
     assert_eq!(error.code.as_deref(), Some("rate_limit_error"));
     assert!(error.retryable);
+}
+
+#[tokio::test]
+async fn generate_retries_rate_limits_and_server_errors() {
+    let success = json!({
+        "id": "chatcmpl-retried",
+        "choices": [{
+            "message": {"role": "assistant", "content": "recovered"},
+            "finish_reason": "stop"
+        }]
+    });
+    let (base_url, requests_rx) = serve_json_sequence(vec![
+        JsonResponse::error(429, "rate limited").with_retry_after("0"),
+        JsonResponse::error(503, "temporarily unavailable").with_retry_after("0"),
+        JsonResponse::success(success),
+    ])
+    .await;
+    let model = OpenAIChatModel::builder()
+        .model("test-model")
+        .api_key("secret")
+        .base_url(base_url)
+        .retry_policy(
+            RetryPolicy::new(3)
+                .with_initial_delay(Duration::ZERO)
+                .with_max_delay(Duration::ZERO),
+        )
+        .build()
+        .unwrap();
+
+    let response = model
+        .generate(ChatRequest::new([Msg::user("Hello")]))
+        .await
+        .unwrap();
+    let requests = requests_rx.await.unwrap();
+
+    assert_eq!(response.text_content(""), Some("recovered".to_owned()));
+    assert_eq!(requests.len(), 3);
+    let bodies = requests
+        .iter()
+        .map(|request| request.split("\r\n\r\n").nth(1).unwrap())
+        .collect::<Vec<_>>();
+    assert!(bodies.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[tokio::test]
+async fn generate_does_not_retry_non_retryable_client_errors() {
+    let (base_url, requests_rx) =
+        serve_json_sequence(vec![JsonResponse::error(400, "invalid request")]).await;
+    let model = OpenAIChatModel::builder()
+        .model("test-model")
+        .api_key("secret")
+        .base_url(base_url)
+        .retry_policy(RetryPolicy::new(5).with_initial_delay(Duration::ZERO))
+        .build()
+        .unwrap();
+
+    let error = model
+        .generate(ChatRequest::new([Msg::user("Hello")]))
+        .await
+        .unwrap_err();
+    let requests = requests_rx.await.unwrap();
+
+    assert_eq!(error.message, "invalid request");
+    assert!(!error.retryable);
+    assert_eq!(requests.len(), 1);
 }
 
 #[tokio::test]
@@ -279,6 +345,39 @@ async fn stream_reports_invalid_sse_data() {
     assert_eq!(error.code.as_deref(), Some("invalid_stream"));
 }
 
+#[tokio::test]
+async fn stream_retries_rate_limit_before_first_event() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let base_url = serve_rate_limit_then_sse(sse.as_bytes().to_vec()).await;
+    let model = OpenAIChatModel::builder()
+        .model("test-model")
+        .api_key("secret")
+        .base_url(base_url)
+        .retry_policy(
+            RetryPolicy::new(1)
+                .with_initial_delay(Duration::ZERO)
+                .with_max_delay(Duration::ZERO),
+        )
+        .build()
+        .unwrap();
+
+    let mut stream = model
+        .stream(ChatRequest::new([Msg::user("Hello")]))
+        .await
+        .unwrap();
+    let mut accumulator = ChatResponseAccumulator::new();
+    while let Some(event) = stream.next().await {
+        accumulator.apply(event.unwrap()).unwrap();
+    }
+    let response = accumulator.into_response().unwrap();
+
+    assert_eq!(response.text_content(""), Some("recovered".to_owned()));
+}
+
 fn local_model(base_url: String) -> OpenAIChatModel {
     OpenAIChatModel::builder()
         .model("deepseek-chat")
@@ -318,24 +417,104 @@ async fn serve_sse_once(chunks: Vec<Vec<u8>>) -> (String, oneshot::Receiver<Stri
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_http_request(&mut socket).await;
-        socket
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
-            )
-            .await
-            .unwrap();
-        for chunk in chunks {
-            socket
-                .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
-                .await
-                .unwrap();
-            socket.write_all(&chunk).await.unwrap();
-            socket.write_all(b"\r\n").await.unwrap();
-        }
-        socket.write_all(b"0\r\n\r\n").await.unwrap();
+        write_sse_response(&mut socket, chunks).await;
         request_tx.send(request).ok();
     });
     (format!("http://{address}"), request_rx)
+}
+
+async fn serve_rate_limit_then_sse(sse: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        read_http_request(&mut first).await;
+        let body = r#"{"error":{"message":"slow down","type":"rate_limit_error"}}"#;
+        let reply = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        first.write_all(reply.as_bytes()).await.unwrap();
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        read_http_request(&mut second).await;
+        write_sse_response(&mut second, vec![sse]).await;
+    });
+    format!("http://{address}")
+}
+
+async fn write_sse_response(socket: &mut tokio::net::TcpStream, chunks: Vec<Vec<u8>>) {
+    socket
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    for chunk in chunks {
+        socket
+            .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+            .await
+            .unwrap();
+        socket.write_all(&chunk).await.unwrap();
+        socket.write_all(b"\r\n").await.unwrap();
+    }
+    socket.write_all(b"0\r\n\r\n").await.unwrap();
+}
+
+struct JsonResponse {
+    status: u16,
+    retry_after: Option<String>,
+    body: Value,
+}
+
+impl JsonResponse {
+    fn success(body: Value) -> Self {
+        Self {
+            status: 200,
+            retry_after: None,
+            body,
+        }
+    }
+
+    fn error(status: u16, message: &str) -> Self {
+        Self {
+            status,
+            retry_after: None,
+            body: json!({"error": {"message": message, "type": "provider_error"}}),
+        }
+    }
+
+    fn with_retry_after(mut self, retry_after: &str) -> Self {
+        self.retry_after = Some(retry_after.to_owned());
+        self
+    }
+}
+
+async fn serve_json_sequence(
+    responses: Vec<JsonResponse>,
+) -> (String, oneshot::Receiver<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (requests_tx, requests_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for response in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            requests.push(read_http_request(&mut socket).await);
+            let body = serde_json::to_string(&response.body).unwrap();
+            let retry_after = response
+                .retry_after
+                .map_or_else(String::new, |value| format!("Retry-After: {value}\r\n"));
+            let reply = format!(
+                "HTTP/1.1 {} Test\r\nContent-Type: application/json\r\n{retry_after}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                response.status,
+                body.len()
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        }
+        requests_tx.send(requests).ok();
+    });
+    (format!("http://{address}"), requests_rx)
 }
 
 async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {

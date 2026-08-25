@@ -14,7 +14,7 @@ pub use capabilities::{ModelCapabilities, ModelCapability};
 pub use chat_model::{ChatEventStream, ChatModel, ModelFuture, ModelResult};
 pub use event::{ChatEvent, ModelError};
 pub use mock::MockChatModel;
-pub use openai::{OpenAIChatModel, OpenAIChatModelBuilder, OpenAIConfigError};
+pub use openai::{OpenAIChatModel, OpenAIChatModelBuilder, OpenAIConfigError, RetryPolicy};
 pub use request::{ChatRequest, ChatRequestError, GenerateOptions, ToolDefinition};
 pub use response::{ChatResponse, FinishReason};
 
