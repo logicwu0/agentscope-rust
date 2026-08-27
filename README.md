@@ -43,7 +43,9 @@ asynchronous chat model interface with a deterministic mock. `OpenAIChatModel`
 can now call and stream from OpenAI-compatible chat-completions APIs, including
 DeepSeek, with tool calls, structured output, token usage, timeouts, and
 structured provider errors. The SSE decoder handles arbitrary HTTP chunk
-boundaries and provider-side stream errors.
+boundaries and provider-side stream errors. The first tool-layer API now adds
+an object-safe asynchronous `Tool` trait, invocation contexts, structured tool
+errors, and a deterministic mock.
 
 ```rust
 use std::time::Duration;
@@ -129,7 +131,8 @@ after they have been exercised by working examples.
 
 ### Milestone 3 — Tools
 
-- [ ] Define async and streaming tool interfaces
+- [x] Define an object-safe asynchronous tool interface
+- [ ] Add streaming tool execution
 - [ ] Implement a tool registry and JSON Schema generation
 - [ ] Support tool groups and dynamic tool selection
 - [ ] Add tool execution middleware

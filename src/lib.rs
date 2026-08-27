@@ -4,6 +4,7 @@
 
 pub mod message;
 pub mod model;
+pub mod tool;
 
 pub use model::{
     ChatEvent, ChatEventStream, ChatModel, ChatRequest, ChatRequestError, ChatResponse,
@@ -19,6 +20,8 @@ pub use message::{
     ToolCallError, ToolCallState, ToolResultBlock, ToolResultContent, ToolResultError,
     ToolResultOutput, ToolResultState, UrlSource, Usage,
 };
+
+pub use tool::{MockTool, Tool, ToolContext, ToolError, ToolFuture, ToolInvocation, ToolResult};
 
 /// The current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
