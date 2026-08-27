@@ -21,7 +21,9 @@ pub use message::{
     ToolResultOutput, ToolResultState, UrlSource, Usage,
 };
 
-pub use tool::{MockTool, Tool, ToolContext, ToolError, ToolFuture, ToolInvocation, ToolResult};
+pub use tool::{
+    MockTool, Tool, ToolContext, ToolError, ToolFuture, ToolInvocation, ToolRegistry, ToolResult,
+};
 
 /// The current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

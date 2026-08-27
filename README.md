@@ -45,7 +45,8 @@ DeepSeek, with tool calls, structured output, token usage, timeouts, and
 structured provider errors. The SSE decoder handles arbitrary HTTP chunk
 boundaries and provider-side stream errors. The first tool-layer API now adds
 an object-safe asynchronous `Tool` trait, invocation contexts, structured tool
-errors, and a deterministic mock.
+errors, a deterministic mock, and a named registry with precompiled local JSON
+Schema validation.
 
 ```rust
 use std::time::Duration;
@@ -133,7 +134,8 @@ after they have been exercised by working examples.
 
 - [x] Define an object-safe asynchronous tool interface
 - [ ] Add streaming tool execution
-- [ ] Implement a tool registry and JSON Schema generation
+- [x] Implement a tool registry and JSON Schema input validation
+- [ ] Generate JSON Schema from Rust types
 - [ ] Support tool groups and dynamic tool selection
 - [ ] Add tool execution middleware
 - [ ] Add a procedural macro for ergonomic Rust tool definitions

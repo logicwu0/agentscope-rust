@@ -39,7 +39,8 @@ Token 用量统计、与供应商无关的对话模型响应、确定性的流�
 DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响应、工具调用、
 结构化输出、Token 用量、超时和结构化供应商错误。SSE 解码器可处理任意 HTTP 分片
 边界以及供应商返回的流内错误。工具层现已提供可作为 trait 对象使用的异步 `Tool`
-接口、调用上下文、结构化工具错误以及确定性 Mock。
+接口、调用上下文、结构化工具错误、确定性 Mock，以及使用预编译本地 JSON Schema
+校验的具名注册表。
 
 ```rust
 use std::time::Duration;
@@ -125,7 +126,8 @@ let reply = agent
 
 - [x] 定义可作为 trait 对象使用的异步工具接口
 - [ ] 支持流式工具执行
-- [ ] 实现工具注册表和 JSON Schema 生成
+- [x] 实现工具注册表和 JSON Schema 输入校验
+- [ ] 从 Rust 类型生成 JSON Schema
 - [ ] 支持工具分组和动态工具选择
 - [ ] 添加工具执行中间件
 - [ ] 提供便于定义 Rust 工具的过程宏

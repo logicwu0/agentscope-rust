@@ -4,7 +4,7 @@ use futures_executor::block_on;
 use serde_json::{Value, json};
 
 use crate::{
-    Metadata, MockTool, Tool, ToolCallBlock, ToolContext, ToolDefinition, ToolError,
+    Metadata, MockTool, Tool, ToolCallBlock, ToolContext, ToolDefinition, ToolError, ToolRegistry,
     ToolResultOutput, ToolResultState,
 };
 
@@ -104,4 +104,107 @@ fn tool_error_round_trips_through_json() {
 
     assert_eq!(decoded, error);
     assert_eq!(error.to_string(), "tool error temporary: try later");
+}
+
+#[test]
+fn registry_exports_definitions_in_stable_name_order() {
+    let calculator =
+        ToolDefinition::new("calculator", "Calculate", json!({"type": "object"})).unwrap();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(MockTool::new(weather_definition()).with_output("sunny"))
+        .unwrap();
+    registry
+        .register(MockTool::new(calculator).with_output("42"))
+        .unwrap();
+
+    let names = registry
+        .definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["calculator", "weather"]);
+    assert_eq!(registry.len(), 2);
+    assert!(registry.contains("weather"));
+    assert!(!registry.is_empty());
+}
+
+#[test]
+fn registry_rejects_duplicate_names_and_invalid_schemas() {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(MockTool::new(weather_definition()))
+        .unwrap();
+
+    let duplicate = registry
+        .register(MockTool::new(weather_definition()))
+        .unwrap_err();
+    let invalid_definition =
+        ToolDefinition::new("broken", "Broken", json!({"type": "not-a-json-type"})).unwrap();
+    let invalid = registry
+        .register(MockTool::new(invalid_definition))
+        .unwrap_err();
+
+    assert_eq!(duplicate.code.as_deref(), Some("duplicate_tool"));
+    assert_eq!(invalid.code.as_deref(), Some("invalid_tool_schema"));
+    assert_eq!(registry.len(), 1);
+}
+
+#[test]
+fn registry_does_not_resolve_external_schema_references() {
+    let definition = ToolDefinition::new(
+        "external",
+        "External schema",
+        json!({"$ref": "https://example.com/tool-input.json"}),
+    )
+    .unwrap();
+    let mut registry = ToolRegistry::new();
+
+    let error = registry.register(MockTool::new(definition)).unwrap_err();
+
+    assert_eq!(error.code.as_deref(), Some("invalid_tool_schema"));
+    assert!(registry.is_empty());
+}
+
+#[test]
+fn registry_validates_arguments_before_dispatch() {
+    let tool = Arc::new(MockTool::new(weather_definition()).with_output("sunny"));
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(tool.clone()).unwrap();
+    let invalid = ToolCallBlock::complete("call-7", "weather", r#"{"city":7}"#).unwrap();
+    let valid = ToolCallBlock::complete("call-8", "weather", r#"{"city":"杭州"}"#).unwrap();
+
+    let error = block_on(registry.invoke(&invalid, ToolContext::new())).unwrap_err();
+    let result = block_on(registry.invoke(&valid, ToolContext::new())).unwrap();
+
+    assert_eq!(error.code.as_deref(), Some("tool_schema_mismatch"));
+    assert!(error.message.contains("/city"));
+    assert_eq!(result.id(), "call-8");
+    assert_eq!(tool.recorded_invocations().len(), 1);
+}
+
+#[test]
+fn registry_reports_unknown_tools_without_dispatch() {
+    let registry = ToolRegistry::new();
+    let call = ToolCallBlock::complete("call-9", "missing", "{}").unwrap();
+
+    let error = block_on(registry.invoke(&call, ToolContext::new())).unwrap_err();
+
+    assert_eq!(error.code.as_deref(), Some("unknown_tool"));
+}
+
+#[test]
+fn registry_can_return_and_remove_shared_tools() {
+    let tool = Arc::new(MockTool::new(weather_definition()));
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(tool).unwrap();
+
+    let fetched = registry.get("weather").unwrap();
+    let removed = registry.remove("weather").unwrap();
+
+    assert_eq!(fetched.definition().name, "weather");
+    assert_eq!(removed.definition().name, "weather");
+    assert!(registry.is_empty());
+    assert!(registry.get("weather").is_none());
 }
