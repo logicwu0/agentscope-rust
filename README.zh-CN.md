@@ -40,7 +40,8 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 结构化输出、Token 用量、超时和结构化供应商错误。SSE 解码器可处理任意 HTTP 分片
 边界以及供应商返回的流内错误。工具层现已提供可作为 trait 对象使用的异步 `Tool`
 接口、调用上下文、结构化工具错误、确定性 Mock，以及使用预编译本地 JSON Schema
-校验的具名注册表。
+校验的具名注册表。批量执行器默认顺序运行工具，也可显式并发执行；它会保持结果顺序，
+并将单个调用的分发失败转换为结构化工具错误结果。
 
 ```rust
 use std::time::Duration;
@@ -125,6 +126,7 @@ let reply = agent
 ### 里程碑 3——工具系统
 
 - [x] 定义可作为 trait 对象使用的异步工具接口
+- [x] 支持顺序或并发执行批量工具调用
 - [ ] 支持流式工具执行
 - [x] 实现工具注册表和 JSON Schema 输入校验
 - [ ] 从 Rust 类型生成 JSON Schema

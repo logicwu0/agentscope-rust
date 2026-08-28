@@ -1,11 +1,13 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use futures_executor::block_on;
 use serde_json::{Value, json};
+use tokio::sync::Barrier;
 
 use crate::{
-    Metadata, MockTool, Tool, ToolCallBlock, ToolContext, ToolDefinition, ToolError, ToolRegistry,
-    ToolResultOutput, ToolResultState,
+    Metadata, MockTool, Tool, ToolCallBlock, ToolContext, ToolDefinition, ToolError,
+    ToolExecutionMode, ToolExecutor, ToolFuture, ToolRegistry, ToolResultBlock, ToolResultOutput,
+    ToolResultState,
 };
 
 fn weather_definition() -> ToolDefinition {
@@ -207,4 +209,146 @@ fn registry_can_return_and_remove_shared_tools() {
     assert_eq!(removed.definition().name, "weather");
     assert!(registry.is_empty());
     assert!(registry.get("weather").is_none());
+}
+
+#[test]
+fn executor_defaults_to_sequential_and_preserves_context_and_order() {
+    let weather = Arc::new(MockTool::new(weather_definition()).with_output("sunny"));
+    let calculator = Arc::new(
+        MockTool::new(
+            ToolDefinition::new("calculator", "Calculate", json!({"type": "object"})).unwrap(),
+        )
+        .with_output("42"),
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(weather.clone()).unwrap();
+    registry.register_shared(calculator.clone()).unwrap();
+    let executor = ToolExecutor::new(registry);
+    let calls = [
+        ToolCallBlock::complete("call-10", "weather", r#"{"city":"杭州"}"#).unwrap(),
+        ToolCallBlock::complete("call-11", "calculator", r#"{"expression":"6*7"}"#).unwrap(),
+    ];
+    let mut metadata = Metadata::new();
+    metadata.insert("trace_id".to_owned(), json!("trace-1"));
+
+    let results =
+        block_on(executor.execute_all(&calls, ToolContext::new().with_metadata(metadata.clone())))
+            .unwrap();
+
+    assert_eq!(executor.mode(), ToolExecutionMode::Sequential);
+    assert_eq!(executor.registry().len(), 2);
+    assert_eq!(
+        results.iter().map(ToolResultBlock::id).collect::<Vec<_>>(),
+        ["call-10", "call-11"]
+    );
+    assert_eq!(weather.recorded_invocations()[0].context.metadata, metadata);
+    assert_eq!(
+        calculator.recorded_invocations()[0].context.metadata,
+        metadata
+    );
+}
+
+#[test]
+fn executor_converts_individual_failures_without_stopping_the_batch() {
+    let weather = Arc::new(
+        MockTool::new(weather_definition()).with_error(
+            ToolError::new("weather service unavailable")
+                .with_code("upstream_unavailable")
+                .with_retryable(true),
+        ),
+    );
+    let calculator = Arc::new(
+        MockTool::new(
+            ToolDefinition::new("calculator", "Calculate", json!({"type": "object"})).unwrap(),
+        )
+        .with_output("42"),
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(weather.clone()).unwrap();
+    registry.register_shared(calculator.clone()).unwrap();
+    let executor = ToolExecutor::new(registry);
+    let calls = [
+        ToolCallBlock::complete("call-12", "missing", "{}").unwrap(),
+        ToolCallBlock::complete("call-13", "weather", r#"{"city":7}"#).unwrap(),
+        ToolCallBlock::complete("call-14", "weather", r#"{"city":"杭州"}"#).unwrap(),
+        ToolCallBlock::complete("call-15", "calculator", "{}").unwrap(),
+    ];
+
+    let results = block_on(executor.execute_all(&calls, ToolContext::new())).unwrap();
+
+    assert_eq!(results.len(), calls.len());
+    assert_eq!(
+        results
+            .iter()
+            .map(ToolResultBlock::state)
+            .collect::<Vec<_>>(),
+        [
+            ToolResultState::Error,
+            ToolResultState::Error,
+            ToolResultState::Error,
+            ToolResultState::Success,
+        ]
+    );
+    assert_eq!(results[0].metadata["error"]["code"], "unknown_tool");
+    assert_eq!(results[1].metadata["error"]["code"], "tool_schema_mismatch");
+    assert_eq!(results[2].metadata["error"]["code"], "upstream_unavailable");
+    assert_eq!(results[2].metadata["error"]["retryable"], true);
+    assert_eq!(results[3].output(), &ToolResultOutput::Text("42".into()));
+    assert_eq!(weather.recorded_invocations().len(), 1);
+    assert_eq!(calculator.recorded_invocations().len(), 1);
+}
+
+struct BarrierTool {
+    definition: ToolDefinition,
+    barrier: Arc<Barrier>,
+    output: String,
+}
+
+impl Tool for BarrierTool {
+    fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+
+    fn execute(&self, _input: Value, _context: ToolContext) -> ToolFuture<'_, ToolResultOutput> {
+        let barrier = Arc::clone(&self.barrier);
+        let output = self.output.clone();
+        Box::pin(async move {
+            barrier.wait().await;
+            Ok(output.into())
+        })
+    }
+}
+
+#[tokio::test]
+async fn concurrent_executor_starts_calls_together_and_preserves_order() {
+    let barrier = Arc::new(Barrier::new(2));
+    let mut registry = ToolRegistry::new();
+    for (name, output) in [("first", "one"), ("second", "two")] {
+        registry
+            .register(BarrierTool {
+                definition: ToolDefinition::new(name, name, json!({"type": "object"})).unwrap(),
+                barrier: Arc::clone(&barrier),
+                output: output.to_owned(),
+            })
+            .unwrap();
+    }
+    let executor = ToolExecutor::new(registry).with_mode(ToolExecutionMode::Concurrent);
+    let calls = [
+        ToolCallBlock::complete("call-16", "first", "{}").unwrap(),
+        ToolCallBlock::complete("call-17", "second", "{}").unwrap(),
+    ];
+
+    let results = tokio::time::timeout(
+        Duration::from_secs(1),
+        executor.execute_all(&calls, ToolContext::new()),
+    )
+    .await
+    .expect("concurrent calls should both reach the barrier")
+    .unwrap();
+
+    assert_eq!(executor.mode(), ToolExecutionMode::Concurrent);
+    assert_eq!(results[0].id(), "call-16");
+    assert_eq!(results[0].output(), &ToolResultOutput::Text("one".into()));
+    assert_eq!(results[1].id(), "call-17");
+    assert_eq!(results[1].output(), &ToolResultOutput::Text("two".into()));
 }

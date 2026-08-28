@@ -46,7 +46,9 @@ structured provider errors. The SSE decoder handles arbitrary HTTP chunk
 boundaries and provider-side stream errors. The first tool-layer API now adds
 an object-safe asynchronous `Tool` trait, invocation contexts, structured tool
 errors, a deterministic mock, and a named registry with precompiled local JSON
-Schema validation.
+Schema validation. A batch executor runs calls sequentially by default or
+concurrently when requested, preserves input order, and converts individual
+dispatch failures into structured tool-result errors.
 
 ```rust
 use std::time::Duration;
@@ -133,6 +135,7 @@ after they have been exercised by working examples.
 ### Milestone 3 — Tools
 
 - [x] Define an object-safe asynchronous tool interface
+- [x] Execute tool-call batches sequentially or concurrently
 - [ ] Add streaming tool execution
 - [x] Implement a tool registry and JSON Schema input validation
 - [ ] Generate JSON Schema from Rust types

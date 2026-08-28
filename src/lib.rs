@@ -22,7 +22,8 @@ pub use message::{
 };
 
 pub use tool::{
-    MockTool, Tool, ToolContext, ToolError, ToolFuture, ToolInvocation, ToolRegistry, ToolResult,
+    MockTool, Tool, ToolContext, ToolError, ToolExecutionMode, ToolExecutor, ToolFuture,
+    ToolInvocation, ToolRegistry, ToolResult,
 };
 
 /// The current crate version.
