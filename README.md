@@ -32,7 +32,7 @@ behavioral compatibility will be evaluated feature by feature.
 
 ## Current Status
 
-**Milestone 2 — model layer**
+**Milestone 4 — minimal agent loop**
 
 The project foundation and continuous integration are in place. The public API
 now provides roles, text, thinking, validated multimodal data blocks,
@@ -48,7 +48,9 @@ an object-safe asynchronous `Tool` trait, invocation contexts, structured tool
 errors, a deterministic mock, and a named registry with precompiled local JSON
 Schema validation. A batch executor runs calls sequentially by default or
 concurrently when requested, preserves input order, and converts individual
-dispatch failures into structured tool-result errors.
+dispatch failures into structured tool-result errors. The first non-streaming
+`ReActAgent` now connects model generation, tool execution, observations, and
+the final response in a bounded loop.
 
 ```rust
 use std::time::Duration;
@@ -77,20 +79,14 @@ configuration file:
 ```shell
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_stream
+DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react
 ```
 
 ```rust
-// Target agent API direction — illustrative only, not implemented yet.
-let agent = ReActAgent::builder()
-    .name("Friday")
-    .model(OpenAIChatModel::from_env("qwen-plus")?)
-    .tool(weather)
-    .memory(InMemoryMemory::new())
-    .build()?;
+let agent = ReActAgent::new("Friday", model, tool_executor)?
+    .with_max_steps(8)?;
 
-let reply = agent
-    .reply(Msg::user("What is the weather in Hangzhou today?"))
-    .await?;
+let reply = agent.reply(Msg::user("What is 6 * 7?")).await?;
 ```
 
 ## Roadmap / TODO
@@ -145,9 +141,10 @@ after they have been exercised by working examples.
 
 ### Milestone 4 — Memory and Agents
 
-- [ ] Define `Memory` and `Agent` traits
+- [ ] Define a `Memory` trait
+- [x] Define an object-safe asynchronous `Agent` trait
 - [ ] Implement in-memory conversation history
-- [ ] Implement a minimal `ReActAgent`
+- [x] Implement a minimal non-streaming `ReActAgent`
 - [ ] Add observation, hooks, interruption, and human-in-the-loop support
 - [ ] Add state persistence and session restoration
 - [ ] Provide single-agent and multi-agent examples

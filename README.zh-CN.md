@@ -30,7 +30,7 @@ Python API。
 
 ## 当前状态
 
-**里程碑 2——模型层**
+**里程碑 4——最小 Agent 循环**
 
 工程基础和持续集成已经就绪。公开 API 已实现角色、文本、思考、经过校验的多模态
 数据块、支持流式参数的工具调用、多模态工具结果、流式结构化 JSON 输出块、
@@ -41,7 +41,8 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 边界以及供应商返回的流内错误。工具层现已提供可作为 trait 对象使用的异步 `Tool`
 接口、调用上下文、结构化工具错误、确定性 Mock，以及使用预编译本地 JSON Schema
 校验的具名注册表。批量执行器默认顺序运行工具，也可显式并发执行；它会保持结果顺序，
-并将单个调用的分发失败转换为结构化工具错误结果。
+并将单个调用的分发失败转换为结构化工具错误结果。首个非流式 `ReActAgent` 已将模型
+生成、工具执行、观察结果和最终回答连接成带有步数上限的完整循环。
 
 ```rust
 use std::time::Duration;
@@ -69,20 +70,14 @@ let response = model
 ```shell
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_stream
+DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_react
 ```
 
 ```rust
-// 目标 Agent API 方向——仅作示意，目前尚未实现。
-let agent = ReActAgent::builder()
-    .name("Friday")
-    .model(OpenAIChatModel::from_env("qwen-plus")?)
-    .tool(weather)
-    .memory(InMemoryMemory::new())
-    .build()?;
+let agent = ReActAgent::new("Friday", model, tool_executor)?
+    .with_max_steps(8)?;
 
-let reply = agent
-    .reply(Msg::user("杭州今天天气怎么样？"))
-    .await?;
+let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 ```
 
 ## 路线图 / TODO
@@ -136,9 +131,10 @@ let reply = agent
 
 ### 里程碑 4——记忆与 Agent
 
-- [ ] 定义 `Memory` 和 `Agent` trait
+- [ ] 定义 `Memory` trait
+- [x] 定义可作为 trait 对象使用的异步 `Agent` trait
 - [ ] 实现内存会话历史
-- [ ] 实现最小可用的 `ReActAgent`
+- [x] 实现最小可用的非流式 `ReActAgent`
 - [ ] 支持观察、Hook、中断和 Human-in-the-loop
 - [ ] 支持状态持久化和会话恢复
 - [ ] 提供单 Agent 与多 Agent 示例
