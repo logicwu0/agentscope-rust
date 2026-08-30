@@ -4,6 +4,7 @@ use std::{fmt, sync::Arc};
 
 use crate::{
     ContentBlock, GenerateOptions, Msg, Role, ToolCallBlock,
+    memory::Memory,
     model::{ChatModel, ChatRequest, FinishReason},
     tool::{ToolContext, ToolExecutor},
 };
@@ -14,8 +15,8 @@ const DEFAULT_MAX_STEPS: usize = 8;
 
 /// A minimal reason-act-observe agent.
 ///
-/// Each [`Self::reply`] call owns an isolated, temporary conversation. The
-/// model is called until it returns no tool calls or reaches `max_steps`.
+/// The model is called until it returns no tool calls or reaches `max_steps`.
+/// Conversations are isolated unless a [`Memory`] implementation is attached.
 #[derive(Clone)]
 pub struct ReActAgent {
     name: String,
@@ -24,6 +25,7 @@ pub struct ReActAgent {
     max_steps: usize,
     system_prompt: Option<String>,
     options: GenerateOptions,
+    memory: Option<Arc<dyn Memory>>,
 }
 
 impl ReActAgent {
@@ -60,6 +62,7 @@ impl ReActAgent {
             max_steps: DEFAULT_MAX_STEPS,
             system_prompt: None,
             options: GenerateOptions::new(),
+            memory: None,
         })
     }
 
@@ -76,7 +79,7 @@ impl ReActAgent {
         Ok(self)
     }
 
-    /// Sets instructions prepended to every isolated conversation.
+    /// Sets instructions prepended to every model request without persisting them.
     #[must_use]
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
@@ -88,6 +91,29 @@ impl ReActAgent {
     pub fn with_options(mut self, options: GenerateOptions) -> Self {
         self.options = options;
         self
+    }
+
+    /// Attaches owned conversation memory shared across replies.
+    #[must_use]
+    pub fn with_memory<M>(mut self, memory: M) -> Self
+    where
+        M: Memory + 'static,
+    {
+        self.memory = Some(Arc::new(memory));
+        self
+    }
+
+    /// Attaches shared conversation memory across replies.
+    #[must_use]
+    pub fn with_shared_memory(mut self, memory: Arc<dyn Memory>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Returns the attached conversation memory, when configured.
+    #[must_use]
+    pub const fn memory(&self) -> Option<&Arc<dyn Memory>> {
+        self.memory.as_ref()
     }
 
     /// Returns the model/tool iteration limit.
@@ -102,18 +128,24 @@ impl ReActAgent {
         &self.tools
     }
 
-    /// Produces one reply using an isolated `ReAct` conversation.
+    /// Produces one reply using a `ReAct` conversation.
     #[must_use]
     pub fn reply(&self, message: Msg) -> AgentFuture<'_, Msg> {
         Box::pin(async move {
-            let mut history = Vec::new();
-            if let Some(prompt) = &self.system_prompt {
-                history.push(Msg::system(prompt));
+            let mut history = match &self.memory {
+                Some(memory) => memory.messages().await?,
+                None => Vec::new(),
+            };
+            if let Some(memory) = &self.memory {
+                memory.append(vec![message.clone()]).await?;
             }
             history.push(message);
 
+            let system_prompt = self.system_prompt.as_ref().map(Msg::system);
+
             for step in 0..self.max_steps {
-                let request = ChatRequest::new(history.clone())
+                let request_messages = system_prompt.iter().cloned().chain(history.iter().cloned());
+                let request = ChatRequest::new(request_messages)
                     .with_options(self.options.clone())
                     .with_tools(self.tools.registry().definitions());
                 let response = self.model.generate(request).await?;
@@ -136,9 +168,15 @@ impl ReActAgent {
                                 .to_owned(),
                         ));
                     }
+                    if let Some(memory) = &self.memory {
+                        memory.append(vec![assistant_message.clone()]).await?;
+                    }
                     return Ok(assistant_message);
                 }
 
+                if let Some(memory) = &self.memory {
+                    memory.append(vec![assistant_message.clone()]).await?;
+                }
                 history.push(assistant_message);
                 if step + 1 == self.max_steps {
                     return Err(AgentError::MaxStepsExceeded {
@@ -146,11 +184,15 @@ impl ReActAgent {
                     });
                 }
                 let results = self.tools.execute_all(&calls, ToolContext::new()).await?;
-                history.push(Msg::new(
+                let observation = Msg::new(
                     "tool",
                     Role::Assistant,
                     results.into_iter().map(ContentBlock::from),
-                ));
+                );
+                if let Some(memory) = &self.memory {
+                    memory.append(vec![observation.clone()]).await?;
+                }
+                history.push(observation);
             }
 
             unreachable!("positive max_steps and loop exits cover all responses")
@@ -178,6 +220,7 @@ impl fmt::Debug for ReActAgent {
             .field("max_steps", &self.max_steps)
             .field("system_prompt", &self.system_prompt)
             .field("options", &self.options)
+            .field("has_memory", &self.memory.is_some())
             .finish()
     }
 }

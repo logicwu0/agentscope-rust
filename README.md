@@ -50,7 +50,9 @@ Schema validation. A batch executor runs calls sequentially by default or
 concurrently when requested, preserves input order, and converts individual
 dispatch failures into structured tool-result errors. The first non-streaming
 `ReActAgent` now connects model generation, tool execution, observations, and
-the final response in a bounded loop.
+the final response in a bounded loop. An object-safe `Memory` interface and
+thread-safe `InMemoryMemory` can preserve complete conversations across agent
+replies.
 
 ```rust
 use std::time::Duration;
@@ -83,8 +85,10 @@ DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react
 ```
 
 ```rust
+let memory = Arc::new(InMemoryMemory::new());
 let agent = ReActAgent::new("Friday", model, tool_executor)?
-    .with_max_steps(8)?;
+    .with_max_steps(8)?
+    .with_shared_memory(memory);
 
 let reply = agent.reply(Msg::user("What is 6 * 7?")).await?;
 ```
@@ -141,9 +145,9 @@ after they have been exercised by working examples.
 
 ### Milestone 4 — Memory and Agents
 
-- [ ] Define a `Memory` trait
+- [x] Define an object-safe asynchronous `Memory` trait
 - [x] Define an object-safe asynchronous `Agent` trait
-- [ ] Implement in-memory conversation history
+- [x] Implement thread-safe in-memory conversation history
 - [x] Implement a minimal non-streaming `ReActAgent`
 - [ ] Add observation, hooks, interruption, and human-in-the-loop support
 - [ ] Add state persistence and session restoration

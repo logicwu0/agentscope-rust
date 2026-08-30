@@ -3,11 +3,13 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod memory;
 pub mod message;
 pub mod model;
 pub mod tool;
 
 pub use agent::{Agent, AgentError, AgentFuture, AgentResult, ReActAgent};
+pub use memory::{InMemoryMemory, Memory, MemoryError, MemoryFuture, MemoryResult};
 
 pub use model::{
     ChatEvent, ChatEventStream, ChatModel, ChatRequest, ChatRequestError, ChatResponse,

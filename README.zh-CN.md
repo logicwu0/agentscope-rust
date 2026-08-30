@@ -42,7 +42,9 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 接口、调用上下文、结构化工具错误、确定性 Mock，以及使用预编译本地 JSON Schema
 校验的具名注册表。批量执行器默认顺序运行工具，也可显式并发执行；它会保持结果顺序，
 并将单个调用的分发失败转换为结构化工具错误结果。首个非流式 `ReActAgent` 已将模型
-生成、工具执行、观察结果和最终回答连接成带有步数上限的完整循环。
+生成、工具执行、观察结果和最终回答连接成带有步数上限的完整循环。可作为 trait 对象
+使用的 `Memory` 接口和线程安全的 `InMemoryMemory` 可以在 Agent 的多次回复之间保留
+完整对话。
 
 ```rust
 use std::time::Duration;
@@ -74,8 +76,10 @@ DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_react
 ```
 
 ```rust
+let memory = Arc::new(InMemoryMemory::new());
 let agent = ReActAgent::new("Friday", model, tool_executor)?
-    .with_max_steps(8)?;
+    .with_max_steps(8)?
+    .with_shared_memory(memory);
 
 let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 ```
@@ -131,9 +135,9 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 
 ### 里程碑 4——记忆与 Agent
 
-- [ ] 定义 `Memory` trait
+- [x] 定义可作为 trait 对象使用的异步 `Memory` trait
 - [x] 定义可作为 trait 对象使用的异步 `Agent` trait
-- [ ] 实现内存会话历史
+- [x] 实现线程安全的内存会话历史
 - [x] 实现最小可用的非流式 `ReActAgent`
 - [ ] 支持观察、Hook、中断和 Human-in-the-loop
 - [ ] 支持状态持久化和会话恢复

@@ -5,8 +5,8 @@ use serde_json::json;
 
 use crate::{
     Agent, AgentError, ChatModel, ChatResponse, ContentBlock, FinishReason, GenerateOptions,
-    MockChatModel, MockTool, Msg, ReActAgent, Role, ToolCallBlock, ToolDefinition, ToolExecutor,
-    ToolRegistry, ToolResultOutput, ToolResultState,
+    InMemoryMemory, Memory, MockChatModel, MockTool, Msg, ReActAgent, Role, ToolCallBlock,
+    ToolDefinition, ToolExecutor, ToolRegistry, ToolResultOutput, ToolResultState,
 };
 
 fn calculator_definition() -> ToolDefinition {
@@ -39,8 +39,11 @@ fn react_agent_completes_a_model_tool_model_loop() {
     let mut registry = ToolRegistry::new();
     registry.register_shared(tool.clone()).unwrap();
     let shared_model: Arc<dyn ChatModel> = model.clone();
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_memory: Arc<dyn Memory> = memory.clone();
     let agent = ReActAgent::from_shared("Friday", shared_model, ToolExecutor::new(registry))
         .unwrap()
+        .with_shared_memory(shared_memory)
         .with_system_prompt("Use tools when helpful.")
         .with_options(GenerateOptions::new().with_temperature(0.0));
 
@@ -71,6 +74,63 @@ fn react_agent_completes_a_model_tool_model_loop() {
     };
     assert_eq!(result.state(), ToolResultState::Success);
     assert_eq!(result.output(), &ToolResultOutput::Text("42".to_owned()));
+
+    let remembered = block_on(memory.messages()).unwrap();
+    assert_eq!(remembered.len(), 4);
+    assert_eq!(remembered[0].role, Role::User);
+    assert!(matches!(
+        remembered[1].content[0],
+        ContentBlock::ToolCall(_)
+    ));
+    assert!(matches!(
+        remembered[2].content[0],
+        ContentBlock::ToolResult(_)
+    ));
+    assert_eq!(remembered[3], reply);
+}
+
+#[test]
+fn react_agent_uses_memory_across_replies() {
+    let model = Arc::new(
+        MockChatModel::new("mock-model")
+            .with_response(ChatResponse::completed([ContentBlock::from(
+                "I will remember that your favorite color is green.",
+            )]))
+            .with_response(ChatResponse::completed([ContentBlock::from(
+                "Your favorite color is green.",
+            )])),
+    );
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_model: Arc<dyn ChatModel> = model.clone();
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let agent = ReActAgent::from_shared(
+        "Friday",
+        shared_model,
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_shared_memory(shared_memory);
+
+    block_on(agent.reply(Msg::user("My favorite color is green."))).unwrap();
+    let reply = block_on(agent.reply(Msg::user("What is my favorite color?"))).unwrap();
+
+    assert_eq!(
+        reply.text_content(""),
+        Some("Your favorite color is green.".to_owned())
+    );
+    let requests = model.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].messages.len(), 1);
+    assert_eq!(requests[1].messages.len(), 3);
+    assert_eq!(
+        requests[1].messages[0].text_content(""),
+        Some("My favorite color is green.".to_owned())
+    );
+    assert_eq!(
+        requests[1].messages[1].text_content(""),
+        Some("I will remember that your favorite color is green.".to_owned())
+    );
+    assert_eq!(block_on(memory.messages()).unwrap().len(), 4);
 }
 
 #[test]

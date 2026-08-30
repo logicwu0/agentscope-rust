@@ -4,7 +4,7 @@ mod react;
 
 use std::{fmt, future::Future, pin::Pin};
 
-use crate::{Msg, model::ModelError, tool::ToolError};
+use crate::{Msg, memory::MemoryError, model::ModelError, tool::ToolError};
 
 pub use react::ReActAgent;
 
@@ -34,6 +34,8 @@ pub enum AgentError {
     Model(ModelError),
     /// Tool execution infrastructure failed.
     Tool(ToolError),
+    /// Conversation memory failed.
+    Memory(MemoryError),
     /// The model produced a response that cannot drive the agent loop.
     InvalidModelResponse(String),
     /// The model continued requesting tools after the configured limit.
@@ -50,6 +52,7 @@ impl fmt::Display for AgentError {
             Self::ZeroMaxSteps => formatter.write_str("agent max_steps must be greater than zero"),
             Self::Model(error) => write!(formatter, "agent model failed: {error}"),
             Self::Tool(error) => write!(formatter, "agent tool execution failed: {error}"),
+            Self::Memory(error) => write!(formatter, "agent memory failed: {error}"),
             Self::InvalidModelResponse(message) => {
                 write!(formatter, "invalid model response: {message}")
             }
@@ -68,6 +71,7 @@ impl std::error::Error for AgentError {
         match self {
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),
+            Self::Memory(error) => Some(error),
             Self::EmptyName
             | Self::ZeroMaxSteps
             | Self::InvalidModelResponse(_)
@@ -85,6 +89,12 @@ impl From<ModelError> for AgentError {
 impl From<ToolError> for AgentError {
     fn from(error: ToolError) -> Self {
         Self::Tool(error)
+    }
+}
+
+impl From<MemoryError> for AgentError {
+    fn from(error: MemoryError) -> Self {
+        Self::Memory(error)
     }
 }
 
