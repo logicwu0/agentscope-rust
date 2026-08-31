@@ -3,8 +3,8 @@ use futures_util::{StreamExt, stream};
 use serde_json::json;
 
 use crate::{
-    AgentError, AgentEvent, AgentEventStream, ChatEvent, ContentBlock, FinishReason, MemoryError,
-    ModelError, Msg, ToolCallBlock, ToolError, ToolResultBlock, Usage,
+    AgentError, AgentEvent, AgentEventStream, AgentHookError, ChatEvent, ContentBlock,
+    FinishReason, MemoryError, ModelError, Msg, ToolCallBlock, ToolError, ToolResultBlock, Usage,
 };
 
 #[test]
@@ -145,6 +145,7 @@ fn every_agent_error_variant_round_trips_through_json() {
         AgentError::Model(ModelError::new("model failed").with_code("model_failure")),
         AgentError::Tool(ToolError::new("tool failed").with_code("tool_failure")),
         AgentError::Memory(MemoryError::new("memory failed").with_code("memory_failure")),
+        AgentError::Hook(AgentHookError::new("hook failed").with_code("hook_failure")),
         AgentError::InvalidModelResponse("partial response".to_owned()),
         AgentError::MaxStepsExceeded { max_steps: 8 },
     ];

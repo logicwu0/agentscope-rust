@@ -47,7 +47,8 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 完整对话。可选的 `sqlite` feature 提供 `SQLiteMemory`，为本地应用和单机服务实现具备
 事务与会话隔离能力的持久化。可序列化的 `AgentEvent` 协议覆盖模型增量、工具执行、
 步骤结束、最终回复和终止错误。`ReActAgent::stream` 现已在完整的模型—工具—模型循环中
-实时发送这些事件。
+实时发送这些事件。只读、可作为 trait 对象使用的异步 `AgentHook` 可以按照确定的注册
+顺序观察回复、模型和工具生命周期边界。
 
 ```rust
 use std::time::Duration;
@@ -73,6 +74,7 @@ let response = model
 无需将 Key 写入源码或提交的配置文件，即可运行完整示例：
 
 ```shell
+cargo run --example hooks
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_react
@@ -148,7 +150,8 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 - [x] 实现最小可用的非流式 `ReActAgent`
 - [x] 定义可序列化的流式 Agent 事件协议
 - [x] 实现流式 `ReActAgent` 执行
-- [ ] 支持观察、Hook、中断和 Human-in-the-loop
+- [x] 支持只读异步生命周期 Hook
+- [ ] 支持直接观察、中断和 Human-in-the-loop
 - [ ] 支持状态持久化和会话恢复
 - [ ] 提供单 Agent 与多 Agent 示例
 

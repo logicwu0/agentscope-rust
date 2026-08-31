@@ -56,7 +56,9 @@ replies. The optional `sqlite` feature adds transactional, session-isolated
 `SQLiteMemory` persistence for local applications and single-node services. A
 serializable `AgentEvent` protocol defines model deltas, tool execution, step
 completion, final replies, and terminal errors. `ReActAgent::stream` now emits
-those events in real time across the complete model-tool-model loop.
+those events in real time across the complete model-tool-model loop. Read-only,
+object-safe asynchronous `AgentHook`s can observe reply, model, and tool
+lifecycle boundaries in deterministic registration order.
 
 ```rust
 use std::time::Duration;
@@ -83,6 +85,7 @@ Run the complete example without putting the key in source code or a committed
 configuration file:
 
 ```shell
+cargo run --example hooks
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react
@@ -159,7 +162,8 @@ after they have been exercised by working examples.
 - [x] Implement a minimal non-streaming `ReActAgent`
 - [x] Define a serializable streaming agent event protocol
 - [x] Implement streaming `ReActAgent` execution
-- [ ] Add observation, hooks, interruption, and human-in-the-loop support
+- [x] Add read-only asynchronous lifecycle hooks
+- [ ] Add direct observation, interruption, and human-in-the-loop support
 - [ ] Add state persistence and session restoration
 - [ ] Provide single-agent and multi-agent examples
 

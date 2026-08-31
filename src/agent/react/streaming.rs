@@ -7,7 +7,8 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 
 use crate::{
-    AgentError, AgentEvent, AgentEventStream, ContentBlock, Msg, Role, ToolCallBlock,
+    AgentError, AgentEvent, AgentEventStream, AgentHookEvent, ContentBlock, Msg, Role,
+    ToolCallBlock,
     model::{ChatRequest, ChatResponse, ChatResponseAccumulator, FinishReason},
     tool::ToolContext,
 };
@@ -38,6 +39,10 @@ impl ReActAgent {
     #[must_use]
     pub fn stream(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
         Box::pin(async move {
+            self.notify_hooks(&AgentHookEvent::BeforeReply {
+                message: message.clone(),
+            })
+            .await?;
             let mut history = match &self.memory {
                 Some(memory) => memory.messages().await?,
                 None => Vec::new(),
@@ -60,6 +65,13 @@ impl ReActAgent {
             for step_index in 0..self.max_steps {
                 let step = step_index + 1;
                 let request = self.chat_request(&history, system_prompt.as_ref());
+                if let Err(error) = self.notify_hooks(&AgentHookEvent::BeforeModelCall {
+                    step,
+                    request: request.clone(),
+                }).await {
+                    yield Ok(error_event(step, error));
+                    return;
+                }
                 let mut model_step = self.model_step(step, request);
                 let mut completed_response = None;
                 while let Some(item) = model_step.next().await {
@@ -77,6 +89,13 @@ impl ReActAgent {
                 let Some(response) = completed_response else {
                     return;
                 };
+                if let Err(error) = self.notify_hooks(&AgentHookEvent::AfterModelCall {
+                    step,
+                    response: response.clone(),
+                }).await {
+                    yield Ok(error_event(step, error));
+                    return;
+                }
                 let calls = response.tool_calls().cloned().collect::<Vec<_>>();
                 let finish_reason = response.finish_reason;
                 let assistant = response.into_assistant_msg(&self.name);
@@ -92,21 +111,42 @@ impl ReActAgent {
                         yield Ok(error_event(step, error));
                         return;
                     }
+                    if let Err(error) = self.notify_hooks(&AgentHookEvent::AfterReply {
+                        steps: step,
+                        message: assistant.clone(),
+                    }).await {
+                        yield Ok(error_event(step, error));
+                        return;
+                    }
                     yield Ok(AgentEvent::Finished { steps: step, message: assistant });
                     return;
                 }
 
-                if let Err(error) = self.remember(assistant.clone()).await {
-                    yield Ok(error_event(step, error));
-                    return;
-                }
-                history.push(assistant);
                 if step == self.max_steps {
+                    if let Err(error) = self.remember(assistant).await {
+                        yield Ok(error_event(step, error));
+                        return;
+                    }
                     yield Ok(error_event(step, AgentError::MaxStepsExceeded {
                         max_steps: self.max_steps,
                     }));
                     return;
                 }
+
+                for call in &calls {
+                    if let Err(error) = self.notify_hooks(&AgentHookEvent::BeforeToolCall {
+                        step,
+                        call: call.clone(),
+                    }).await {
+                        yield Ok(error_event(step, error));
+                        return;
+                    }
+                }
+                if let Err(error) = self.remember(assistant.clone()).await {
+                    yield Ok(error_event(step, error));
+                    return;
+                }
+                history.push(assistant);
 
                 let mut tool_step = self.tool_step(step, calls);
                 while let Some(item) = tool_step.next().await {
@@ -119,10 +159,6 @@ impl ReActAgent {
                             }
                         }
                         ToolStepItem::Observation(observation) => {
-                            if let Err(error) = self.remember(observation.clone()).await {
-                                yield Ok(error_event(step, error));
-                                return;
-                            }
                             history.push(observation);
                         }
                     }
@@ -182,17 +218,29 @@ impl ReActAgent {
                     return;
                 }
             };
+            let observation = Msg::new(
+                "tool",
+                Role::Assistant,
+                results.iter().cloned().map(ContentBlock::from),
+            );
+            if let Err(error) = self.remember(observation.clone()).await {
+                yield ToolStepItem::Event(error_event(step, error));
+                return;
+            }
             for result in &results {
+                if let Err(error) = self.notify_hooks(&AgentHookEvent::AfterToolCall {
+                    step,
+                    result: result.clone(),
+                }).await {
+                    yield ToolStepItem::Event(error_event(step, error));
+                    return;
+                }
                 yield ToolStepItem::Event(AgentEvent::ToolFinished {
                     step,
                     result: result.clone(),
                 });
             }
-            yield ToolStepItem::Observation(Msg::new(
-                "tool",
-                Role::Assistant,
-                results.into_iter().map(ContentBlock::from),
-            ));
+            yield ToolStepItem::Observation(observation);
         })
     }
 

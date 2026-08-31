@@ -1,6 +1,7 @@
 //! Agent interfaces and built-in implementations.
 
 mod event;
+mod hook;
 mod react;
 
 use std::{fmt, future::Future, pin::Pin};
@@ -16,6 +17,7 @@ use crate::{
 };
 
 pub use event::AgentEvent;
+pub use hook::{AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture, AgentHookResult};
 pub use react::ReActAgent;
 
 /// Result returned by an agent operation.
@@ -53,6 +55,8 @@ pub enum AgentError {
     Tool(ToolError),
     /// Conversation memory failed.
     Memory(MemoryError),
+    /// A lifecycle hook failed.
+    Hook(AgentHookError),
     /// The model produced a response that cannot drive the agent loop.
     InvalidModelResponse(String),
     /// The model continued requesting tools after the configured limit.
@@ -70,6 +74,7 @@ impl fmt::Display for AgentError {
             Self::Model(error) => write!(formatter, "agent model failed: {error}"),
             Self::Tool(error) => write!(formatter, "agent tool execution failed: {error}"),
             Self::Memory(error) => write!(formatter, "agent memory failed: {error}"),
+            Self::Hook(error) => write!(formatter, "agent lifecycle hook failed: {error}"),
             Self::InvalidModelResponse(message) => {
                 write!(formatter, "invalid model response: {message}")
             }
@@ -89,6 +94,7 @@ impl std::error::Error for AgentError {
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),
             Self::Memory(error) => Some(error),
+            Self::Hook(error) => Some(error),
             Self::EmptyName
             | Self::ZeroMaxSteps
             | Self::InvalidModelResponse(_)
@@ -112,6 +118,12 @@ impl From<ToolError> for AgentError {
 impl From<MemoryError> for AgentError {
     fn from(error: MemoryError) -> Self {
         Self::Memory(error)
+    }
+}
+
+impl From<AgentHookError> for AgentError {
+    fn from(error: AgentHookError) -> Self {
+        Self::Hook(error)
     }
 }
 

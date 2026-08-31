@@ -9,7 +9,8 @@ pub mod model;
 pub mod tool;
 
 pub use agent::{
-    Agent, AgentError, AgentEvent, AgentEventStream, AgentFuture, AgentResult, ReActAgent,
+    Agent, AgentError, AgentEvent, AgentEventStream, AgentFuture, AgentHook, AgentHookError,
+    AgentHookEvent, AgentHookFuture, AgentHookResult, AgentResult, ReActAgent,
 };
 #[cfg(feature = "sqlite")]
 pub use memory::SQLiteMemory;

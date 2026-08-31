@@ -5,7 +5,8 @@ mod streaming;
 use std::{fmt, sync::Arc};
 
 use crate::{
-    AgentEventStream, ContentBlock, GenerateOptions, Msg, Role, ToolCallBlock,
+    AgentEventStream, AgentHook, AgentHookEvent, ContentBlock, GenerateOptions, Msg, Role,
+    ToolCallBlock,
     memory::Memory,
     model::{ChatModel, ChatRequest, FinishReason},
     tool::{ToolContext, ToolExecutor},
@@ -28,6 +29,7 @@ pub struct ReActAgent {
     system_prompt: Option<String>,
     options: GenerateOptions,
     memory: Option<Arc<dyn Memory>>,
+    hooks: Vec<Arc<dyn AgentHook>>,
 }
 
 impl ReActAgent {
@@ -65,6 +67,7 @@ impl ReActAgent {
             system_prompt: None,
             options: GenerateOptions::new(),
             memory: None,
+            hooks: Vec::new(),
         })
     }
 
@@ -118,6 +121,29 @@ impl ReActAgent {
         self.memory.as_ref()
     }
 
+    /// Adds an owned read-only lifecycle hook.
+    #[must_use]
+    pub fn with_hook<H>(mut self, hook: H) -> Self
+    where
+        H: AgentHook + 'static,
+    {
+        self.hooks.push(Arc::new(hook));
+        self
+    }
+
+    /// Adds a shared read-only lifecycle hook.
+    #[must_use]
+    pub fn with_shared_hook(mut self, hook: Arc<dyn AgentHook>) -> Self {
+        self.hooks.push(hook);
+        self
+    }
+
+    /// Returns lifecycle hooks in execution order.
+    #[must_use]
+    pub fn hooks(&self) -> &[Arc<dyn AgentHook>] {
+        &self.hooks
+    }
+
     /// Returns the model/tool iteration limit.
     #[must_use]
     pub const fn max_steps(&self) -> usize {
@@ -134,6 +160,10 @@ impl ReActAgent {
     #[must_use]
     pub fn reply(&self, message: Msg) -> AgentFuture<'_, Msg> {
         Box::pin(async move {
+            self.notify_hooks(&AgentHookEvent::BeforeReply {
+                message: message.clone(),
+            })
+            .await?;
             let mut history = match &self.memory {
                 Some(memory) => memory.messages().await?,
                 None => Vec::new(),
@@ -150,12 +180,22 @@ impl ReActAgent {
                 let request = ChatRequest::new(request_messages)
                     .with_options(self.options.clone())
                     .with_tools(self.tools.registry().definitions());
+                self.notify_hooks(&AgentHookEvent::BeforeModelCall {
+                    step: step + 1,
+                    request: request.clone(),
+                })
+                .await?;
                 let response = self.model.generate(request).await?;
                 if !response.is_last {
                     return Err(AgentError::InvalidModelResponse(
                         "complete generation returned a partial response".to_owned(),
                     ));
                 }
+                self.notify_hooks(&AgentHookEvent::AfterModelCall {
+                    step: step + 1,
+                    response: response.clone(),
+                })
+                .await?;
                 let finish_reason = response.finish_reason;
                 let calls = response
                     .tool_calls()
@@ -173,31 +213,62 @@ impl ReActAgent {
                     if let Some(memory) = &self.memory {
                         memory.append(vec![assistant_message.clone()]).await?;
                     }
+                    self.notify_hooks(&AgentHookEvent::AfterReply {
+                        steps: step + 1,
+                        message: assistant_message.clone(),
+                    })
+                    .await?;
                     return Ok(assistant_message);
                 }
 
-                if let Some(memory) = &self.memory {
-                    memory.append(vec![assistant_message.clone()]).await?;
-                }
-                history.push(assistant_message);
                 if step + 1 == self.max_steps {
+                    if let Some(memory) = &self.memory {
+                        memory.append(vec![assistant_message]).await?;
+                    }
                     return Err(AgentError::MaxStepsExceeded {
                         max_steps: self.max_steps,
                     });
                 }
+                for call in &calls {
+                    self.notify_hooks(&AgentHookEvent::BeforeToolCall {
+                        step: step + 1,
+                        call: call.clone(),
+                    })
+                    .await?;
+                }
+                if let Some(memory) = &self.memory {
+                    memory.append(vec![assistant_message.clone()]).await?;
+                }
+                history.push(assistant_message);
                 let results = self.tools.execute_all(&calls, ToolContext::new()).await?;
                 let observation = Msg::new(
                     "tool",
                     Role::Assistant,
-                    results.into_iter().map(ContentBlock::from),
+                    results.iter().cloned().map(ContentBlock::from),
                 );
                 if let Some(memory) = &self.memory {
                     memory.append(vec![observation.clone()]).await?;
+                }
+                for result in &results {
+                    self.notify_hooks(&AgentHookEvent::AfterToolCall {
+                        step: step + 1,
+                        result: result.clone(),
+                    })
+                    .await?;
                 }
                 history.push(observation);
             }
 
             unreachable!("positive max_steps and loop exits cover all responses")
+        })
+    }
+
+    pub(super) fn notify_hooks<'a>(&'a self, event: &'a AgentHookEvent) -> AgentFuture<'a, ()> {
+        Box::pin(async move {
+            for hook in &self.hooks {
+                hook.on_event(event).await?;
+            }
+            Ok(())
         })
     }
 }
@@ -227,6 +298,7 @@ impl fmt::Debug for ReActAgent {
             .field("system_prompt", &self.system_prompt)
             .field("options", &self.options)
             .field("has_memory", &self.memory.is_some())
+            .field("hooks", &self.hooks.len())
             .finish()
     }
 }

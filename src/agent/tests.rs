@@ -1,13 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures_executor::block_on;
 use futures_util::StreamExt;
 use serde_json::json;
 
 use crate::{
-    Agent, AgentError, AgentEvent, ChatEvent, ChatModel, ChatResponse, ContentBlock, FinishReason,
-    GenerateOptions, InMemoryMemory, Memory, MockChatModel, MockTool, ModelError, ModelResult, Msg,
-    ReActAgent, Role, ToolCallBlock, ToolDefinition, ToolExecutor, ToolRegistry, ToolResultOutput,
+    Agent, AgentError, AgentEvent, AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture,
+    ChatEvent, ChatModel, ChatResponse, ContentBlock, FinishReason, GenerateOptions,
+    InMemoryMemory, Memory, MockChatModel, MockTool, ModelError, ModelResult, Msg, ReActAgent,
+    Role, ToolCallBlock, ToolDefinition, ToolExecutor, ToolRegistry, ToolResultOutput,
     ToolResultState, Usage,
 };
 
@@ -62,6 +63,45 @@ fn final_answer_stream() -> [ModelResult<ChatEvent>; 4] {
             reason: FinishReason::Completed,
         }),
     ]
+}
+
+struct OrderedHook {
+    name: &'static str,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl AgentHook for OrderedHook {
+    fn on_event<'a>(&'a self, event: &'a AgentHookEvent) -> AgentHookFuture<'a> {
+        Box::pin(async move {
+            let kind = match event {
+                AgentHookEvent::BeforeReply { .. } => "before_reply",
+                AgentHookEvent::BeforeModelCall { .. } => "before_model_call",
+                AgentHookEvent::AfterModelCall { .. } => "after_model_call",
+                AgentHookEvent::BeforeToolCall { .. } => "before_tool_call",
+                AgentHookEvent::AfterToolCall { .. } => "after_tool_call",
+                AgentHookEvent::AfterReply { .. } => "after_reply",
+            };
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{}:{kind}", self.name));
+            Ok(())
+        })
+    }
+}
+
+struct RejectToolHook;
+
+impl AgentHook for RejectToolHook {
+    fn on_event<'a>(&'a self, event: &'a AgentHookEvent) -> AgentHookFuture<'a> {
+        Box::pin(async move {
+            if matches!(event, AgentHookEvent::BeforeToolCall { .. }) {
+                Err(AgentHookError::new("tool observation rejected").with_code("hook_rejected"))
+            } else {
+                Ok(())
+            }
+        })
+    }
 }
 
 #[test]
@@ -129,6 +169,58 @@ fn react_agent_completes_a_model_tool_model_loop() {
         ContentBlock::ToolResult(_)
     ));
     assert_eq!(remembered[3], reply);
+}
+
+#[test]
+fn react_agent_runs_lifecycle_hooks_in_registration_order() {
+    let call =
+        ToolCallBlock::complete("call-hook-1", "calculator", r#"{"expression":"6*7"}"#).unwrap();
+    let model = MockChatModel::new("mock-model")
+        .with_response(ChatResponse::finished(
+            [ContentBlock::from(call)],
+            FinishReason::ToolCalls,
+        ))
+        .with_response(ChatResponse::completed([ContentBlock::from("42")]));
+    let tool = MockTool::new(calculator_definition()).with_output("42");
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).unwrap();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let agent = ReActAgent::new("Friday", model, ToolExecutor::new(registry))
+        .unwrap()
+        .with_hook(OrderedHook {
+            name: "first",
+            events: recorded.clone(),
+        })
+        .with_hook(OrderedHook {
+            name: "second",
+            events: recorded.clone(),
+        });
+
+    let reply = block_on(agent.reply(Msg::user("What is 6 * 7?"))).unwrap();
+
+    assert_eq!(reply.text_content(""), Some("42".to_owned()));
+    assert_eq!(agent.hooks().len(), 2);
+    assert_eq!(
+        *recorded.lock().unwrap(),
+        [
+            "first:before_reply",
+            "second:before_reply",
+            "first:before_model_call",
+            "second:before_model_call",
+            "first:after_model_call",
+            "second:after_model_call",
+            "first:before_tool_call",
+            "second:before_tool_call",
+            "first:after_tool_call",
+            "second:after_tool_call",
+            "first:before_model_call",
+            "second:before_model_call",
+            "first:after_model_call",
+            "second:after_model_call",
+            "first:after_reply",
+            "second:after_reply",
+        ]
+    );
 }
 
 #[test]
@@ -397,6 +489,49 @@ fn react_agent_stream_stops_before_unobservable_tool_execution() {
         AgentEvent::ToolStarted { .. } | AgentEvent::ToolFinished { .. }
     )));
     assert!(tool.recorded_invocations().is_empty());
+}
+
+#[test]
+fn react_agent_stream_converts_hook_failures_to_terminal_events() {
+    let model = MockChatModel::new("mock-model").with_stream(calculator_call_stream());
+    let tool = Arc::new(MockTool::new(calculator_definition()).with_output("42"));
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(tool.clone()).unwrap();
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let agent = ReActAgent::new("Friday", model, ToolExecutor::new(registry))
+        .unwrap()
+        .with_hook(RejectToolHook)
+        .with_shared_memory(shared_memory);
+
+    let events = block_on(async {
+        agent
+            .stream(Msg::user("What is 6 * 7?"))
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    });
+
+    assert!(matches!(
+        events.last().unwrap(),
+        AgentEvent::Error {
+            step: Some(1),
+            error: AgentError::Hook(error),
+        } if error.code.as_deref() == Some("hook_rejected")
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+    );
+    assert!(tool.recorded_invocations().is_empty());
+    let remembered = block_on(memory.messages()).unwrap();
+    assert_eq!(remembered.len(), 1);
+    assert_eq!(remembered[0].role, Role::User);
 }
 
 #[test]
