@@ -52,7 +52,8 @@ dispatch failures into structured tool-result errors. The first non-streaming
 `ReActAgent` now connects model generation, tool execution, observations, and
 the final response in a bounded loop. An object-safe `Memory` interface and
 thread-safe `InMemoryMemory` can preserve complete conversations across agent
-replies.
+replies. The optional `sqlite` feature adds transactional, session-isolated
+`SQLiteMemory` persistence for local applications and single-node services.
 
 ```rust
 use std::time::Duration;
@@ -85,13 +86,15 @@ DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react
 ```
 
 ```rust
-let memory = Arc::new(InMemoryMemory::new());
+let memory = Arc::new(SQLiteMemory::open("agentscope.db", "session-1").await?);
 let agent = ReActAgent::new("Friday", model, tool_executor)?
     .with_max_steps(8)?
     .with_shared_memory(memory);
 
 let reply = agent.reply(Msg::user("What is 6 * 7?")).await?;
 ```
+
+Enable the persistent backend with `features = ["sqlite"]` in your dependency.
 
 ## Roadmap / TODO
 
@@ -148,6 +151,7 @@ after they have been exercised by working examples.
 - [x] Define an object-safe asynchronous `Memory` trait
 - [x] Define an object-safe asynchronous `Agent` trait
 - [x] Implement thread-safe in-memory conversation history
+- [x] Implement transactional SQLite conversation history
 - [x] Implement a minimal non-streaming `ReActAgent`
 - [ ] Add observation, hooks, interruption, and human-in-the-loop support
 - [ ] Add state persistence and session restoration

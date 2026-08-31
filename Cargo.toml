@@ -10,6 +10,10 @@ keywords = ["agent", "ai", "llm", "agentscope"]
 categories = ["asynchronous"]
 publish = false
 
+[features]
+default = []
+sqlite = ["dep:tokio-rusqlite"]
+
 [lib]
 name = "agentscope"
 path = "src/lib.rs"
@@ -25,12 +29,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["time"] }
+tokio-rusqlite = { version = "0.7", features = ["bundled"], optional = true }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 futures-executor = "0.3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"
