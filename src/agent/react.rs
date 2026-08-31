@@ -1,9 +1,11 @@
 //! Minimal non-streaming `ReAct` agent loop.
 
+mod streaming;
+
 use std::{fmt, sync::Arc};
 
 use crate::{
-    ContentBlock, GenerateOptions, Msg, Role, ToolCallBlock,
+    AgentEventStream, ContentBlock, GenerateOptions, Msg, Role, ToolCallBlock,
     memory::Memory,
     model::{ChatModel, ChatRequest, FinishReason},
     tool::{ToolContext, ToolExecutor},
@@ -207,6 +209,10 @@ impl Agent for ReActAgent {
 
     fn reply(&self, message: Msg) -> AgentFuture<'_, Msg> {
         Self::reply(self, message)
+    }
+
+    fn stream(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
+        Self::stream(self, message)
     }
 }
 

@@ -54,9 +54,9 @@ the final response in a bounded loop. An object-safe `Memory` interface and
 thread-safe `InMemoryMemory` can preserve complete conversations across agent
 replies. The optional `sqlite` feature adds transactional, session-isolated
 `SQLiteMemory` persistence for local applications and single-node services. A
-serializable `AgentEvent` protocol now defines model deltas, tool execution,
-step completion, final replies, and terminal errors for the upcoming streaming
-agent loop.
+serializable `AgentEvent` protocol defines model deltas, tool execution, step
+completion, final replies, and terminal errors. `ReActAgent::stream` now emits
+those events in real time across the complete model-tool-model loop.
 
 ```rust
 use std::time::Duration;
@@ -86,6 +86,7 @@ configuration file:
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react
+DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react_stream
 ```
 
 ```rust
@@ -157,7 +158,7 @@ after they have been exercised by working examples.
 - [x] Implement transactional SQLite conversation history
 - [x] Implement a minimal non-streaming `ReActAgent`
 - [x] Define a serializable streaming agent event protocol
-- [ ] Implement streaming `ReActAgent` execution
+- [x] Implement streaming `ReActAgent` execution
 - [ ] Add observation, hooks, interruption, and human-in-the-loop support
 - [ ] Add state persistence and session restoration
 - [ ] Provide single-agent and multi-agent examples

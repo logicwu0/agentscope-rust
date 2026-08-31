@@ -8,7 +8,12 @@ use std::{fmt, future::Future, pin::Pin};
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
-use crate::{Msg, memory::MemoryError, model::ModelError, tool::ToolError};
+use crate::{
+    Msg,
+    memory::MemoryError,
+    model::{ChatStreamError, ModelError},
+    tool::ToolError,
+};
 
 pub use event::AgentEvent;
 pub use react::ReActAgent;
@@ -29,6 +34,9 @@ pub trait Agent: Send + Sync {
 
     /// Produces one reply to an input message.
     fn reply(&self, message: Msg) -> AgentFuture<'_, Msg>;
+
+    /// Streams one reply as model, tool, and lifecycle events.
+    fn stream(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>>;
 }
 
 /// A configuration or runtime agent failure.
@@ -104,6 +112,15 @@ impl From<ToolError> for AgentError {
 impl From<MemoryError> for AgentError {
     fn from(error: MemoryError) -> Self {
         Self::Memory(error)
+    }
+}
+
+impl From<ChatStreamError> for AgentError {
+    fn from(error: ChatStreamError) -> Self {
+        match error {
+            ChatStreamError::Model(error) => Self::Model(error),
+            error => Self::InvalidModelResponse(error.to_string()),
+        }
     }
 }
 
