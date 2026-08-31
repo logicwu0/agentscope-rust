@@ -57,8 +57,10 @@ replies. The optional `sqlite` feature adds transactional, session-isolated
 serializable `AgentEvent` protocol defines model deltas, tool execution, step
 completion, final replies, and terminal errors. `ReActAgent::stream` now emits
 those events in real time across the complete model-tool-model loop. Read-only,
-object-safe asynchronous `AgentHook`s can observe reply, model, and tool
-lifecycle boundaries in deterministic registration order.
+object-safe asynchronous `AgentHook`s can observe reply, observation, model,
+and tool lifecycle boundaries in deterministic registration order.
+`Agent::observe` stores external messages in configured conversation memory
+without triggering a model call.
 
 ```rust
 use std::time::Duration;
@@ -98,6 +100,7 @@ let agent = ReActAgent::new("Friday", model, tool_executor)?
     .with_max_steps(8)?
     .with_shared_memory(memory);
 
+agent.observe(Msg::assistant("planner", "Use exact arithmetic.")).await?;
 let reply = agent.reply(Msg::user("What is 6 * 7?")).await?;
 ```
 
@@ -163,7 +166,8 @@ after they have been exercised by working examples.
 - [x] Define a serializable streaming agent event protocol
 - [x] Implement streaming `ReActAgent` execution
 - [x] Add read-only asynchronous lifecycle hooks
-- [ ] Add direct observation, interruption, and human-in-the-loop support
+- [x] Add direct external-message observation
+- [ ] Add interruption and human-in-the-loop support
 - [ ] Add state persistence and session restoration
 - [ ] Provide single-agent and multi-agent examples
 

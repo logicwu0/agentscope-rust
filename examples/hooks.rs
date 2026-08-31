@@ -4,8 +4,8 @@ use std::error::Error;
 
 use agentscope::{
     AgentHook, AgentHookEvent, AgentHookFuture, ChatResponse, ContentBlock, FinishReason,
-    MockChatModel, MockTool, Msg, ReActAgent, ToolCallBlock, ToolDefinition, ToolExecutor,
-    ToolRegistry,
+    InMemoryMemory, MockChatModel, MockTool, Msg, ReActAgent, ToolCallBlock, ToolDefinition,
+    ToolExecutor, ToolRegistry,
 };
 use serde_json::json;
 
@@ -15,6 +15,10 @@ impl AgentHook for LifecycleLogger {
     fn on_event<'a>(&'a self, event: &'a AgentHookEvent) -> AgentHookFuture<'a> {
         Box::pin(async move {
             match event {
+                AgentHookEvent::BeforeObserve { message } => {
+                    println!("observing message from {}", message.name);
+                }
+                AgentHookEvent::AfterObserve { .. } => println!("observation stored"),
                 AgentHookEvent::BeforeReply { .. } => println!("reply started"),
                 AgentHookEvent::BeforeModelCall { step, .. } => {
                     println!("model call {step} started");
@@ -61,8 +65,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut registry = ToolRegistry::new();
     registry.register(tool)?;
     let agent = ReActAgent::new("calculator", model, ToolExecutor::new(registry))?
+        .with_memory(InMemoryMemory::new())
         .with_hook(LifecycleLogger);
 
+    futures_executor::block_on(agent.observe(Msg::assistant("planner", "Use exact arithmetic.")))?;
     let reply = futures_executor::block_on(agent.reply(Msg::user("What is 6 * 7?")))?;
     println!("answer: {}", reply.text_content("").unwrap_or_default());
     Ok(())

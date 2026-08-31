@@ -16,6 +16,16 @@ pub type AgentHookFuture<'a> = Pin<Box<dyn Future<Output = AgentHookResult<()>> 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentHookEvent {
+    /// The agent is about to store an externally observed message.
+    BeforeObserve {
+        /// The external message to store.
+        message: Msg,
+    },
+    /// The agent stored an externally observed message.
+    AfterObserve {
+        /// The external message that was stored.
+        message: Msg,
+    },
     /// The agent accepted a new input message.
     BeforeReply {
         /// The input that will start the reply.

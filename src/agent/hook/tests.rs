@@ -36,6 +36,25 @@ fn hook_trait_is_object_safe_and_events_round_trip_through_json() {
 }
 
 #[test]
+fn observation_hook_events_round_trip_through_json() {
+    let events = [
+        AgentHookEvent::BeforeObserve {
+            message: Msg::assistant("planner", "Use exact arithmetic."),
+        },
+        AgentHookEvent::AfterObserve {
+            message: Msg::assistant("planner", "Use exact arithmetic."),
+        },
+    ];
+
+    let encoded = serde_json::to_value(&events).unwrap();
+    let decoded: Vec<AgentHookEvent> = serde_json::from_value(encoded.clone()).unwrap();
+
+    assert_eq!(decoded, events);
+    assert_eq!(encoded[0]["type"], "before_observe");
+    assert_eq!(encoded[1]["type"], "after_observe");
+}
+
+#[test]
 fn hook_errors_are_structured_and_round_trip_through_json() {
     let error = AgentHookError::new("metrics backend unavailable").with_code("metrics_down");
 

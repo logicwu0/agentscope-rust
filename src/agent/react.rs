@@ -156,6 +156,30 @@ impl ReActAgent {
         &self.tools
     }
 
+    /// Stores an external message in configured memory without calling the model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::MemoryNotConfigured`] when no memory is attached,
+    /// or propagates hook and memory failures.
+    #[must_use]
+    pub fn observe(&self, message: Msg) -> AgentFuture<'_, ()> {
+        Box::pin(async move {
+            let memory = self
+                .memory
+                .as_ref()
+                .ok_or(AgentError::MemoryNotConfigured)?;
+            self.notify_hooks(&AgentHookEvent::BeforeObserve {
+                message: message.clone(),
+            })
+            .await?;
+            memory.append(vec![message.clone()]).await?;
+            self.notify_hooks(&AgentHookEvent::AfterObserve { message })
+                .await?;
+            Ok(())
+        })
+    }
+
     /// Produces one reply using a `ReAct` conversation.
     #[must_use]
     pub fn reply(&self, message: Msg) -> AgentFuture<'_, Msg> {
@@ -284,6 +308,10 @@ impl Agent for ReActAgent {
 
     fn stream(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
         Self::stream(self, message)
+    }
+
+    fn observe(&self, message: Msg) -> AgentFuture<'_, ()> {
+        Self::observe(self, message)
     }
 }
 

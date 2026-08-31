@@ -74,6 +74,8 @@ impl AgentHook for OrderedHook {
     fn on_event<'a>(&'a self, event: &'a AgentHookEvent) -> AgentHookFuture<'a> {
         Box::pin(async move {
             let kind = match event {
+                AgentHookEvent::BeforeObserve { .. } => "before_observe",
+                AgentHookEvent::AfterObserve { .. } => "after_observe",
                 AgentHookEvent::BeforeReply { .. } => "before_reply",
                 AgentHookEvent::BeforeModelCall { .. } => "before_model_call",
                 AgentHookEvent::AfterModelCall { .. } => "after_model_call",
@@ -265,6 +267,79 @@ fn react_agent_uses_memory_across_replies() {
         Some("I will remember that your favorite color is green.".to_owned())
     );
     assert_eq!(block_on(memory.messages()).unwrap().len(), 4);
+}
+
+#[test]
+fn react_agent_observes_external_messages_without_calling_the_model() {
+    let model = Arc::new(
+        MockChatModel::new("mock-model").with_response(ChatResponse::completed([
+            ContentBlock::from("I used the observation."),
+        ])),
+    );
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_model: Arc<dyn ChatModel> = model.clone();
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let agent: Arc<dyn Agent> = Arc::new(
+        ReActAgent::from_shared(
+            "Friday",
+            shared_model,
+            ToolExecutor::new(ToolRegistry::new()),
+        )
+        .unwrap()
+        .with_shared_memory(shared_memory)
+        .with_hook(OrderedHook {
+            name: "first",
+            events: recorded.clone(),
+        })
+        .with_hook(OrderedHook {
+            name: "second",
+            events: recorded.clone(),
+        }),
+    );
+    let observation = Msg::assistant("planner", "Use the verified result 42.");
+
+    block_on(agent.observe(observation.clone())).unwrap();
+
+    assert!(model.recorded_requests().is_empty());
+    assert_eq!(block_on(memory.messages()).unwrap(), [observation.clone()]);
+    assert_eq!(
+        *recorded.lock().unwrap(),
+        [
+            "first:before_observe",
+            "second:before_observe",
+            "first:after_observe",
+            "second:after_observe",
+        ]
+    );
+
+    let reply = block_on(agent.reply(Msg::user("What result should I use?"))).unwrap();
+    assert_eq!(
+        reply.text_content(""),
+        Some("I used the observation.".to_owned())
+    );
+    let requests = model.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(requests[0].messages[0], observation);
+    assert_eq!(requests[0].messages[1].role, Role::User);
+}
+
+#[test]
+fn react_agent_rejects_observation_without_memory() {
+    let model = Arc::new(MockChatModel::new("mock-model"));
+    let shared_model: Arc<dyn ChatModel> = model.clone();
+    let agent = ReActAgent::from_shared(
+        "Friday",
+        shared_model,
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap();
+
+    let error = block_on(agent.observe(Msg::assistant("planner", "Remember this."))).unwrap_err();
+
+    assert_eq!(error, AgentError::MemoryNotConfigured);
+    assert!(model.recorded_requests().is_empty());
 }
 
 #[test]

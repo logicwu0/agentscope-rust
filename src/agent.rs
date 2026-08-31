@@ -39,6 +39,9 @@ pub trait Agent: Send + Sync {
 
     /// Streams one reply as model, tool, and lifecycle events.
     fn stream(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>>;
+
+    /// Stores an external message in conversation memory without replying.
+    fn observe(&self, message: Msg) -> AgentFuture<'_, ()>;
 }
 
 /// A configuration or runtime agent failure.
@@ -55,6 +58,8 @@ pub enum AgentError {
     Tool(ToolError),
     /// Conversation memory failed.
     Memory(MemoryError),
+    /// An operation that requires conversation memory had none configured.
+    MemoryNotConfigured,
     /// A lifecycle hook failed.
     Hook(AgentHookError),
     /// The model produced a response that cannot drive the agent loop.
@@ -74,6 +79,9 @@ impl fmt::Display for AgentError {
             Self::Model(error) => write!(formatter, "agent model failed: {error}"),
             Self::Tool(error) => write!(formatter, "agent tool execution failed: {error}"),
             Self::Memory(error) => write!(formatter, "agent memory failed: {error}"),
+            Self::MemoryNotConfigured => {
+                formatter.write_str("agent operation requires configured conversation memory")
+            }
             Self::Hook(error) => write!(formatter, "agent lifecycle hook failed: {error}"),
             Self::InvalidModelResponse(message) => {
                 write!(formatter, "invalid model response: {message}")
@@ -97,6 +105,7 @@ impl std::error::Error for AgentError {
             Self::Hook(error) => Some(error),
             Self::EmptyName
             | Self::ZeroMaxSteps
+            | Self::MemoryNotConfigured
             | Self::InvalidModelResponse(_)
             | Self::MaxStepsExceeded { .. } => None,
         }
