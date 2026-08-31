@@ -53,7 +53,10 @@ dispatch failures into structured tool-result errors. The first non-streaming
 the final response in a bounded loop. An object-safe `Memory` interface and
 thread-safe `InMemoryMemory` can preserve complete conversations across agent
 replies. The optional `sqlite` feature adds transactional, session-isolated
-`SQLiteMemory` persistence for local applications and single-node services.
+`SQLiteMemory` persistence for local applications and single-node services. A
+serializable `AgentEvent` protocol now defines model deltas, tool execution,
+step completion, final replies, and terminal errors for the upcoming streaming
+agent loop.
 
 ```rust
 use std::time::Duration;
@@ -153,9 +156,19 @@ after they have been exercised by working examples.
 - [x] Implement thread-safe in-memory conversation history
 - [x] Implement transactional SQLite conversation history
 - [x] Implement a minimal non-streaming `ReActAgent`
+- [x] Define a serializable streaming agent event protocol
+- [ ] Implement streaming `ReActAgent` execution
 - [ ] Add observation, hooks, interruption, and human-in-the-loop support
 - [ ] Add state persistence and session restoration
 - [ ] Provide single-agent and multi-agent examples
+
+### Storage Plugins
+
+- [ ] Extract SQLite into an `agentscope-memory-sqlite` crate before API stabilization
+- [ ] Add an `agentscope-memory-postgres` plugin
+- [ ] Add an `agentscope-memory-redis` plugin
+- [ ] Add message pagination, retention, and expiration policies
+- [ ] Define storage migration and plugin compatibility policies
 
 ### Milestone 5 — Interoperability
 

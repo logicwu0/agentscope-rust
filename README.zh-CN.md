@@ -45,7 +45,8 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 生成、工具执行、观察结果和最终回答连接成带有步数上限的完整循环。可作为 trait 对象
 使用的 `Memory` 接口和线程安全的 `InMemoryMemory` 可以在 Agent 的多次回复之间保留
 完整对话。可选的 `sqlite` feature 提供 `SQLiteMemory`，为本地应用和单机服务实现具备
-事务与会话隔离能力的持久化。
+事务与会话隔离能力的持久化。可序列化的 `AgentEvent` 协议现已覆盖模型增量、工具
+执行、步骤结束、最终回复和终止错误，为下一步流式 Agent 循环奠定基础。
 
 ```rust
 use std::time::Duration;
@@ -143,9 +144,19 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 - [x] 实现线程安全的内存会话历史
 - [x] 实现具备事务能力的 SQLite 会话历史
 - [x] 实现最小可用的非流式 `ReActAgent`
+- [x] 定义可序列化的流式 Agent 事件协议
+- [ ] 实现流式 `ReActAgent` 执行
 - [ ] 支持观察、Hook、中断和 Human-in-the-loop
 - [ ] 支持状态持久化和会话恢复
 - [ ] 提供单 Agent 与多 Agent 示例
+
+### 存储插件
+
+- [ ] 在 API 稳定前将 SQLite 提取为 `agentscope-memory-sqlite` crate
+- [ ] 添加 `agentscope-memory-postgres` 插件
+- [ ] 添加 `agentscope-memory-redis` 插件
+- [ ] 支持消息分页、保留期限和过期策略
+- [ ] 定义存储迁移与插件兼容策略
 
 ### 里程碑 5——互操作
 

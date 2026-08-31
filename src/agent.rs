@@ -1,11 +1,16 @@
 //! Agent interfaces and built-in implementations.
 
+mod event;
 mod react;
 
 use std::{fmt, future::Future, pin::Pin};
 
+use futures_core::Stream;
+use serde::{Deserialize, Serialize};
+
 use crate::{Msg, memory::MemoryError, model::ModelError, tool::ToolError};
 
+pub use event::AgentEvent;
 pub use react::ReActAgent;
 
 /// Result returned by an agent operation.
@@ -13,6 +18,9 @@ pub type AgentResult<T> = Result<T, AgentError>;
 
 /// A boxed asynchronous agent operation.
 pub type AgentFuture<'a, T> = Pin<Box<dyn Future<Output = AgentResult<T>> + Send + 'a>>;
+
+/// A boxed asynchronous stream of agent lifecycle events.
+pub type AgentEventStream<'a> = Pin<Box<dyn Stream<Item = AgentResult<AgentEvent>> + Send + 'a>>;
 
 /// An object-safe asynchronous agent.
 pub trait Agent: Send + Sync {
@@ -24,7 +32,8 @@ pub trait Agent: Send + Sync {
 }
 
 /// A configuration or runtime agent failure.
-#[derive(Debug)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum AgentError {
     /// The configured agent name was empty.
     EmptyName,
