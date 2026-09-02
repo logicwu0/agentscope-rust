@@ -20,6 +20,11 @@ pub trait Memory: Send + Sync {
     /// Appends messages in the supplied order.
     fn append(&self, messages: Vec<Msg>) -> MemoryFuture<'_, ()>;
 
+    /// Atomically replaces all stored messages with the supplied history.
+    ///
+    /// On failure, the previously stored history must remain unchanged.
+    fn replace(&self, messages: Vec<Msg>) -> MemoryFuture<'_, ()>;
+
     /// Removes all stored messages.
     fn clear(&self) -> MemoryFuture<'_, ()>;
 }

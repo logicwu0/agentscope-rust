@@ -4,6 +4,7 @@ mod event;
 mod hook;
 mod interrupt;
 mod react;
+mod state;
 
 use std::{fmt, future::Future, pin::Pin};
 
@@ -21,6 +22,7 @@ pub use event::AgentEvent;
 pub use hook::{AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture, AgentHookResult};
 pub use interrupt::AgentInterruptHandle;
 pub use react::ReActAgent;
+pub use state::{AGENT_STATE_VERSION, AgentState};
 
 /// Result returned by an agent operation.
 pub type AgentResult<T> = Result<T, AgentError>;
@@ -45,6 +47,12 @@ pub trait Agent: Send + Sync {
     /// Stores an external message in conversation memory without replying.
     fn observe(&self, message: Msg) -> AgentFuture<'_, ()>;
 
+    /// Captures a versioned snapshot of configured conversation state.
+    fn snapshot(&self) -> AgentFuture<'_, AgentState>;
+
+    /// Atomically restores a previously captured conversation state.
+    fn restore(&self, state: AgentState) -> AgentFuture<'_, ()>;
+
     /// Returns a handle that can interrupt in-flight replies on this agent.
     fn interrupt_handle(&self) -> AgentInterruptHandle;
 }
@@ -65,6 +73,20 @@ pub enum AgentError {
     Memory(MemoryError),
     /// An operation that requires conversation memory had none configured.
     MemoryNotConfigured,
+    /// The state snapshot uses a format this crate cannot restore.
+    UnsupportedStateVersion {
+        /// The version found in the snapshot.
+        found: u32,
+        /// The only version supported by this crate.
+        supported: u32,
+    },
+    /// The state snapshot belongs to a differently named agent.
+    StateAgentMismatch {
+        /// The target agent name.
+        expected: String,
+        /// The agent name stored in the snapshot.
+        found: String,
+    },
     /// A lifecycle hook failed.
     Hook(AgentHookError),
     /// The caller interrupted the in-flight agent operation.
@@ -89,6 +111,14 @@ impl fmt::Display for AgentError {
             Self::MemoryNotConfigured => {
                 formatter.write_str("agent operation requires configured conversation memory")
             }
+            Self::UnsupportedStateVersion { found, supported } => write!(
+                formatter,
+                "unsupported agent state version {found}; expected {supported}"
+            ),
+            Self::StateAgentMismatch { expected, found } => write!(
+                formatter,
+                "agent state belongs to {found:?}, but target agent is {expected:?}"
+            ),
             Self::Hook(error) => write!(formatter, "agent lifecycle hook failed: {error}"),
             Self::Interrupted => formatter.write_str("agent operation was interrupted"),
             Self::InvalidModelResponse(message) => {
@@ -114,6 +144,8 @@ impl std::error::Error for AgentError {
             Self::EmptyName
             | Self::ZeroMaxSteps
             | Self::MemoryNotConfigured
+            | Self::UnsupportedStateVersion { .. }
+            | Self::StateAgentMismatch { .. }
             | Self::Interrupted
             | Self::InvalidModelResponse(_)
             | Self::MaxStepsExceeded { .. } => None,

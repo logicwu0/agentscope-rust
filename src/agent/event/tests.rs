@@ -146,6 +146,14 @@ fn every_agent_error_variant_round_trips_through_json() {
         AgentError::Tool(ToolError::new("tool failed").with_code("tool_failure")),
         AgentError::Memory(MemoryError::new("memory failed").with_code("memory_failure")),
         AgentError::MemoryNotConfigured,
+        AgentError::UnsupportedStateVersion {
+            found: 2,
+            supported: 1,
+        },
+        AgentError::StateAgentMismatch {
+            expected: "Friday".to_owned(),
+            found: "Saturday".to_owned(),
+        },
         AgentError::Hook(AgentHookError::new("hook failed").with_code("hook_failure")),
         AgentError::Interrupted,
         AgentError::InvalidModelResponse("partial response".to_owned()),

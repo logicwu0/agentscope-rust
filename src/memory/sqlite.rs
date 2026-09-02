@@ -134,18 +134,7 @@ impl Memory for SQLiteMemory {
             if messages.is_empty() {
                 return Ok(());
             }
-            let serialized = messages
-                .into_iter()
-                .map(|message| {
-                    let message_id = message.id.clone();
-                    serde_json::to_string(&message)
-                        .map(|json| (message_id, json))
-                        .map_err(|error| {
-                            MemoryError::new(format!("message could not be serialized: {error}"))
-                                .with_code("message_serialization")
-                        })
-                })
-                .collect::<MemoryResult<Vec<_>>>()?;
+            let serialized = serialize_messages(messages)?;
 
             connection
                 .call(move |database| {
@@ -168,6 +157,36 @@ impl Memory for SQLiteMemory {
         })
     }
 
+    fn replace(&self, messages: Vec<Msg>) -> MemoryFuture<'_, ()> {
+        let connection = self.connection.clone();
+        let session_id = self.session_id.clone();
+        Box::pin(async move {
+            let serialized = serialize_messages(messages)?;
+            connection
+                .call(move |database| {
+                    let transaction = database
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    transaction.execute(
+                        "DELETE FROM agentscope_memory_messages WHERE session_id = ?1",
+                        [&session_id],
+                    )?;
+                    {
+                        let mut statement = transaction.prepare(
+                            "INSERT INTO agentscope_memory_messages
+                                (session_id, message_id, message_json)
+                             VALUES (?1, ?2, ?3)",
+                        )?;
+                        for (message_id, message_json) in serialized {
+                            statement.execute(params![session_id, message_id, message_json])?;
+                        }
+                    }
+                    transaction.commit()
+                })
+                .await
+                .map_err(|error| map_async_error("sqlite_replace", &error))
+        })
+    }
+
     fn clear(&self) -> MemoryFuture<'_, ()> {
         let connection = self.connection.clone();
         let session_id = self.session_id.clone();
@@ -184,6 +203,21 @@ impl Memory for SQLiteMemory {
                 .map_err(|error| map_async_error("sqlite_clear", &error))
         })
     }
+}
+
+fn serialize_messages(messages: Vec<Msg>) -> MemoryResult<Vec<(String, String)>> {
+    messages
+        .into_iter()
+        .map(|message| {
+            let message_id = message.id.clone();
+            serde_json::to_string(&message)
+                .map(|json| (message_id, json))
+                .map_err(|error| {
+                    MemoryError::new(format!("message could not be serialized: {error}"))
+                        .with_code("message_serialization")
+                })
+        })
+        .collect()
 }
 
 impl fmt::Debug for SQLiteMemory {

@@ -12,7 +12,10 @@ use crate::{
     tool::{ToolContext, ToolExecutor},
 };
 
-use super::{Agent, AgentError, AgentFuture, AgentInterruptHandle, AgentResult};
+use super::{
+    AGENT_STATE_VERSION, Agent, AgentError, AgentFuture, AgentInterruptHandle, AgentResult,
+    AgentState,
+};
 
 const DEFAULT_MAX_STEPS: usize = 8;
 
@@ -184,6 +187,43 @@ impl ReActAgent {
             memory.append(vec![message.clone()]).await?;
             self.notify_hooks(&AgentHookEvent::AfterObserve { message })
                 .await?;
+            Ok(())
+        })
+    }
+
+    /// Captures the complete configured conversation history.
+    #[must_use]
+    pub fn snapshot(&self) -> AgentFuture<'_, AgentState> {
+        Box::pin(async move {
+            let memory = self
+                .memory
+                .as_ref()
+                .ok_or(AgentError::MemoryNotConfigured)?;
+            Ok(AgentState::new(self.name.clone(), memory.messages().await?))
+        })
+    }
+
+    /// Validates and atomically restores a conversation snapshot.
+    #[must_use]
+    pub fn restore(&self, state: AgentState) -> AgentFuture<'_, ()> {
+        Box::pin(async move {
+            let memory = self
+                .memory
+                .as_ref()
+                .ok_or(AgentError::MemoryNotConfigured)?;
+            if state.format_version() != AGENT_STATE_VERSION {
+                return Err(AgentError::UnsupportedStateVersion {
+                    found: state.format_version(),
+                    supported: AGENT_STATE_VERSION,
+                });
+            }
+            if state.agent_name() != self.name {
+                return Err(AgentError::StateAgentMismatch {
+                    expected: self.name.clone(),
+                    found: state.agent_name().to_owned(),
+                });
+            }
+            memory.replace(state.into_messages()).await?;
             Ok(())
         })
     }
@@ -371,6 +411,14 @@ impl Agent for ReActAgent {
 
     fn observe(&self, message: Msg) -> AgentFuture<'_, ()> {
         Self::observe(self, message)
+    }
+
+    fn snapshot(&self) -> AgentFuture<'_, AgentState> {
+        Self::snapshot(self)
+    }
+
+    fn restore(&self, state: AgentState) -> AgentFuture<'_, ()> {
+        Self::restore(self, state)
     }
 
     fn interrupt_handle(&self) -> AgentInterruptHandle {

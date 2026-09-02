@@ -52,7 +52,8 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 已配置的会话 Memory，而不会触发模型调用。可克隆的 `AgentInterruptHandle` 在模型调用、
 流式分片和工具执行周围提供协作式检查点。被中断的工具调用会生成并持久化
 `interrupted` 结果，保证后续会话状态在结构上仍然完整；但中断不会回滚工具已经产生的
-外部副作用。
+外部副作用。版本化且可序列化为 JSON 的 `AgentState` 现可通过 `Agent` trait 对象接口
+快照完整对话历史，并以原子方式恢复。运行期中断控制不会写入持久化状态。
 
 ```rust
 use std::time::Duration;
@@ -80,6 +81,7 @@ let response = model
 ```shell
 cargo run --example hooks
 cargo run --example interruption
+cargo run --example state
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_react
@@ -97,6 +99,7 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 ```
 
 在依赖配置中加入 `features = ["sqlite"]` 即可启用持久化后端。
+请仅在目标 Agent 没有正在执行的回复时调用 `snapshot` 或 `restore`。
 
 ## 路线图 / TODO
 
@@ -122,7 +125,7 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 - [x] 引入与供应商无关的 Token 用量类型
 - [x] 定义通用对话响应和结束原因类型
 - [x] 定义模型错误和流式事件类型
-- [ ] 定义对象状态快照与恢复约定
+- [x] 定义对象状态快照与恢复约定
 - [ ] 添加 JSON 序列化和跨语言兼容测试数据
 
 ### 里程碑 2——模型层
@@ -159,8 +162,9 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 - [x] 支持只读异步生命周期 Hook
 - [x] 支持直接观察外部消息
 - [x] 支持实例级协作式中断
+- [x] 支持版本化的手动 Agent 状态快照与原子恢复
 - [ ] 支持会话级可恢复中断和 Human-in-the-loop
-- [ ] 支持状态持久化和会话恢复
+- [ ] 支持自动的会话级状态存储与恢复
 - [ ] 提供单 Agent 与多 Agent 示例
 
 ### 存储插件

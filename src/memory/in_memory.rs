@@ -42,6 +42,13 @@ impl Memory for InMemoryMemory {
         })
     }
 
+    fn replace(&self, messages: Vec<Msg>) -> MemoryFuture<'_, ()> {
+        Box::pin(async move {
+            *lock(&self.messages) = messages;
+            Ok(())
+        })
+    }
+
     fn clear(&self) -> MemoryFuture<'_, ()> {
         Box::pin(async move {
             lock(&self.messages).clear();

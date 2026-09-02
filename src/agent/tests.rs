@@ -13,12 +13,12 @@ use futures_util::StreamExt;
 use serde_json::json;
 
 use crate::{
-    Agent, AgentError, AgentEvent, AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture,
-    AgentInterruptHandle, ChatEvent, ChatEventStream, ChatModel, ChatRequest, ChatResponse,
-    ContentBlock, FinishReason, GenerateOptions, InMemoryMemory, Memory, MockChatModel, MockTool,
-    ModelCapabilities, ModelError, ModelFuture, ModelResult, Msg, ReActAgent, Role, Tool,
-    ToolCallBlock, ToolContext, ToolDefinition, ToolExecutor, ToolFuture, ToolRegistry,
-    ToolResultOutput, ToolResultState, Usage,
+    AGENT_STATE_VERSION, Agent, AgentError, AgentEvent, AgentHook, AgentHookError, AgentHookEvent,
+    AgentHookFuture, AgentInterruptHandle, AgentState, ChatEvent, ChatEventStream, ChatModel,
+    ChatRequest, ChatResponse, ContentBlock, FinishReason, GenerateOptions, InMemoryMemory, Memory,
+    MockChatModel, MockTool, ModelCapabilities, ModelError, ModelFuture, ModelResult, Msg,
+    ReActAgent, Role, Tool, ToolCallBlock, ToolContext, ToolDefinition, ToolExecutor, ToolFuture,
+    ToolRegistry, ToolResultOutput, ToolResultState, Usage,
 };
 
 fn calculator_definition() -> ToolDefinition {
@@ -427,6 +427,118 @@ fn react_agent_rejects_observation_without_memory() {
 
     assert_eq!(error, AgentError::MemoryNotConfigured);
     assert!(model.recorded_requests().is_empty());
+}
+
+#[test]
+fn react_agent_snapshots_and_restores_complete_conversation_state() {
+    let source_memory = Arc::new(InMemoryMemory::from_messages([
+        Msg::system("Be concise."),
+        Msg::user("Remember this conversation."),
+    ]));
+    let source_shared: Arc<dyn Memory> = source_memory.clone();
+    let source = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("source-model"),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_shared_memory(source_shared);
+    let target_memory = Arc::new(InMemoryMemory::from_messages([Msg::user("replace me")]));
+    let target_shared: Arc<dyn Memory> = target_memory.clone();
+    let target = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("target-model"),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_shared_memory(target_shared);
+
+    let snapshot = block_on(source.snapshot()).unwrap();
+    let serialized = serde_json::to_string(&snapshot).unwrap();
+    let transferred: AgentState = serde_json::from_str(&serialized).unwrap();
+    block_on(target.restore(transferred)).unwrap();
+
+    assert_eq!(snapshot.format_version(), AGENT_STATE_VERSION);
+    assert_eq!(snapshot.agent_name(), "Friday");
+    assert_eq!(block_on(target.snapshot()).unwrap(), snapshot);
+    assert_eq!(block_on(target_memory.messages()).unwrap().len(), 2);
+}
+
+#[test]
+fn react_agent_rejects_incompatible_state_without_changing_memory() {
+    let original = vec![Msg::user("keep me")];
+    let memory = Arc::new(InMemoryMemory::from_messages(original.clone()));
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let agent = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("mock-model"),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_shared_memory(shared_memory);
+
+    let mismatch = block_on(agent.restore(AgentState::new("Saturday", Vec::new()))).unwrap_err();
+    assert_eq!(
+        mismatch,
+        AgentError::StateAgentMismatch {
+            expected: "Friday".to_owned(),
+            found: "Saturday".to_owned(),
+        }
+    );
+    let future_state: AgentState = serde_json::from_value(json!({
+        "format_version": AGENT_STATE_VERSION + 1,
+        "agent_name": "Friday",
+        "messages": [],
+    }))
+    .unwrap();
+    let unsupported = block_on(agent.restore(future_state)).unwrap_err();
+    assert_eq!(
+        unsupported,
+        AgentError::UnsupportedStateVersion {
+            found: AGENT_STATE_VERSION + 1,
+            supported: AGENT_STATE_VERSION,
+        }
+    );
+    assert_eq!(block_on(memory.messages()).unwrap(), original);
+}
+
+#[test]
+fn react_agent_requires_memory_for_state_operations() {
+    let agent = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("mock-model"),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        block_on(agent.snapshot()).unwrap_err(),
+        AgentError::MemoryNotConfigured
+    );
+    assert_eq!(
+        block_on(agent.restore(AgentState::new("Friday", Vec::new()))).unwrap_err(),
+        AgentError::MemoryNotConfigured
+    );
+}
+
+#[test]
+fn agent_state_operations_are_object_safe() {
+    let memory = Arc::new(InMemoryMemory::from_messages([Msg::user("Hello")]));
+    let shared_memory: Arc<dyn Memory> = memory;
+    let agent: Arc<dyn Agent> = Arc::new(
+        ReActAgent::new(
+            "Friday",
+            MockChatModel::new("mock-model"),
+            ToolExecutor::new(ToolRegistry::new()),
+        )
+        .unwrap()
+        .with_shared_memory(shared_memory),
+    );
+
+    let state = block_on(agent.snapshot()).unwrap();
+    block_on(agent.restore(state.clone())).unwrap();
+
+    assert_eq!(block_on(agent.snapshot()).unwrap(), state);
 }
 
 #[test]

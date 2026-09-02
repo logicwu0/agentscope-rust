@@ -64,7 +64,10 @@ without triggering a model call. A cloneable `AgentInterruptHandle` provides
 cooperative checkpoints around model calls, streaming chunks, and tool
 execution. Interrupted tool calls are closed with persisted `interrupted`
 results so later conversation state remains structurally valid. Cancellation
-does not roll back external side effects already performed by a tool.
+does not roll back external side effects already performed by a tool. A
+versioned, JSON-serializable `AgentState` can now snapshot and atomically
+restore complete conversation history through the object-safe `Agent` API.
+Runtime interruption controls are intentionally excluded from persisted state.
 
 ```rust
 use std::time::Duration;
@@ -93,6 +96,7 @@ configuration file:
 ```shell
 cargo run --example hooks
 cargo run --example interruption
+cargo run --example state
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react
@@ -110,6 +114,7 @@ let reply = agent.reply(Msg::user("What is 6 * 7?")).await?;
 ```
 
 Enable the persistent backend with `features = ["sqlite"]` in your dependency.
+Call `snapshot` or `restore` only while no reply is active on that agent.
 
 ## Roadmap / TODO
 
@@ -136,7 +141,7 @@ after they have been exercised by working examples.
 - [x] Introduce a provider-neutral token usage type
 - [x] Define shared chat response and finish reason types
 - [x] Define model errors and streaming event types
-- [ ] Define object state snapshot and restore conventions
+- [x] Define object state snapshot and restore conventions
 - [ ] Add JSON serialization and compatibility fixtures
 
 ### Milestone 2 — Model Layer
@@ -173,8 +178,9 @@ after they have been exercised by working examples.
 - [x] Add read-only asynchronous lifecycle hooks
 - [x] Add direct external-message observation
 - [x] Add instance-level cooperative interruption
+- [x] Add versioned manual agent state snapshot and atomic restoration
 - [ ] Add per-session resumable interruption and human-in-the-loop support
-- [ ] Add state persistence and session restoration
+- [ ] Add automatic per-session state stores and restoration
 - [ ] Provide single-agent and multi-agent examples
 
 ### Storage Plugins

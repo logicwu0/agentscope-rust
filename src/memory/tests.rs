@@ -27,9 +27,24 @@ fn memory_is_object_safe_and_can_be_cleared() {
 
     block_on(memory.append(vec![Msg::user("Hello")])).unwrap();
     assert_eq!(block_on(memory.messages()).unwrap().len(), 1);
+    block_on(memory.replace(vec![Msg::user("Replacement")])).unwrap();
+    assert_eq!(
+        block_on(memory.messages()).unwrap()[0].text_content(""),
+        Some("Replacement".to_owned())
+    );
     block_on(memory.clear()).unwrap();
 
     assert!(block_on(memory.messages()).unwrap().is_empty());
+}
+
+#[test]
+fn in_memory_memory_replaces_the_complete_history() {
+    let memory = InMemoryMemory::from_messages([Msg::user("old")]);
+    let replacement = vec![Msg::system("new system"), Msg::user("new user")];
+
+    block_on(memory.replace(replacement.clone())).unwrap();
+
+    assert_eq!(block_on(memory.messages()).unwrap(), replacement);
 }
 
 #[tokio::test]
@@ -84,6 +99,43 @@ async fn sqlite_memory_isolates_sessions_and_clears_only_one() {
         second.messages().await.unwrap()[0].text_content(""),
         Some("second message".to_owned())
     );
+}
+
+#[tokio::test]
+#[cfg(feature = "sqlite")]
+async fn sqlite_memory_replaces_only_the_selected_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("replace.db");
+    let first = SQLiteMemory::open(&database_path, "first").await.unwrap();
+    let second = SQLiteMemory::open(&database_path, "second").await.unwrap();
+    first.append(vec![Msg::user("old")]).await.unwrap();
+    second.append(vec![Msg::user("untouched")]).await.unwrap();
+    let replacement = vec![Msg::system("new"), Msg::user("history")];
+
+    first.replace(replacement.clone()).await.unwrap();
+
+    assert_eq!(first.messages().await.unwrap(), replacement);
+    assert_eq!(
+        second.messages().await.unwrap()[0].text_content(""),
+        Some("untouched".to_owned())
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "sqlite")]
+async fn sqlite_memory_rolls_back_an_invalid_replacement() {
+    let memory = SQLiteMemory::open_in_memory("session-1").await.unwrap();
+    let original = vec![Msg::user("keep me")];
+    memory.append(original.clone()).await.unwrap();
+    let duplicate = Msg::user("duplicate");
+
+    let error = memory
+        .replace(vec![duplicate.clone(), duplicate])
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code.as_deref(), Some("sqlite_replace"));
+    assert_eq!(memory.messages().await.unwrap(), original);
 }
 
 #[tokio::test]
