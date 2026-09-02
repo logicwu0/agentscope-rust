@@ -7,13 +7,13 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 
 use crate::{
-    AgentError, AgentEvent, AgentEventStream, AgentHookEvent, ContentBlock, Msg, Role,
-    ToolCallBlock,
+    AgentError, AgentEvent, AgentEventStream, AgentHookEvent, Msg, ToolCallBlock,
     model::{ChatRequest, ChatResponse, ChatResponseAccumulator, FinishReason},
     tool::ToolContext,
 };
 
-use super::ReActAgent;
+use super::{ReActAgent, ensure_not_interrupted, interrupted_tool_results};
+use crate::agent::interrupt::AgentInterruptToken;
 use crate::agent::{AgentFuture, AgentResult};
 
 type AgentOperation<'a, T> = Pin<Box<dyn Future<Output = AgentResult<T>> + Send + 'a>>;
@@ -39,10 +39,12 @@ impl ReActAgent {
     #[must_use]
     pub fn stream(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
         Box::pin(async move {
+            let interrupt = self.interrupt.token();
             self.notify_hooks(&AgentHookEvent::BeforeReply {
                 message: message.clone(),
             })
             .await?;
+            ensure_not_interrupted(&interrupt)?;
             let mut history = match &self.memory {
                 Some(memory) => memory.messages().await?,
                 None => Vec::new(),
@@ -52,7 +54,7 @@ impl ReActAgent {
             }
             history.push(message);
             let system_prompt = self.system_prompt.as_ref().map(Msg::system);
-            Ok(self.agent_event_stream(history, system_prompt))
+            Ok(self.agent_event_stream(history, system_prompt, interrupt))
         })
     }
 
@@ -60,10 +62,15 @@ impl ReActAgent {
         &self,
         mut history: Vec<Msg>,
         system_prompt: Option<Msg>,
+        interrupt: AgentInterruptToken,
     ) -> AgentEventStream<'_> {
         Box::pin(stream! {
             for step_index in 0..self.max_steps {
                 let step = step_index + 1;
+                if let Err(error) = ensure_not_interrupted(&interrupt) {
+                    yield Ok(error_event(step, error));
+                    return;
+                }
                 let request = self.chat_request(&history, system_prompt.as_ref());
                 if let Err(error) = self.notify_hooks(&AgentHookEvent::BeforeModelCall {
                     step,
@@ -72,7 +79,11 @@ impl ReActAgent {
                     yield Ok(error_event(step, error));
                     return;
                 }
-                let mut model_step = self.model_step(step, request);
+                if let Err(error) = ensure_not_interrupted(&interrupt) {
+                    yield Ok(error_event(step, error));
+                    return;
+                }
+                let mut model_step = self.model_step(step, request, interrupt.clone());
                 let mut completed_response = None;
                 while let Some(item) = model_step.next().await {
                     match item {
@@ -96,51 +107,39 @@ impl ReActAgent {
                     yield Ok(error_event(step, error));
                     return;
                 }
+                if let Err(error) = ensure_not_interrupted(&interrupt) {
+                    yield Ok(error_event(step, error));
+                    return;
+                }
                 let calls = response.tool_calls().cloned().collect::<Vec<_>>();
                 let finish_reason = response.finish_reason;
                 let assistant = response.into_assistant_msg(&self.name);
 
                 if calls.is_empty() {
-                    if finish_reason == Some(FinishReason::ToolCalls) {
-                        yield Ok(error_event(step, AgentError::InvalidModelResponse(
-                            "finish reason requested tools, but no tool calls were present".to_owned(),
-                        )));
-                        return;
+                    match self.finish_streamed_reply(
+                        step,
+                        finish_reason,
+                        assistant,
+                        &interrupt,
+                    ).await {
+                        Ok(event) => yield Ok(event),
+                        Err(error) => yield Ok(error_event(step, error)),
                     }
-                    if let Err(error) = self.remember(assistant.clone()).await {
-                        yield Ok(error_event(step, error));
-                        return;
-                    }
-                    if let Err(error) = self.notify_hooks(&AgentHookEvent::AfterReply {
-                        steps: step,
-                        message: assistant.clone(),
-                    }).await {
-                        yield Ok(error_event(step, error));
-                        return;
-                    }
-                    yield Ok(AgentEvent::Finished { steps: step, message: assistant });
                     return;
                 }
 
                 if step == self.max_steps {
-                    if let Err(error) = self.remember(assistant).await {
-                        yield Ok(error_event(step, error));
-                        return;
-                    }
-                    yield Ok(error_event(step, AgentError::MaxStepsExceeded {
-                        max_steps: self.max_steps,
-                    }));
+                    yield Ok(self.max_steps_event(step, assistant).await);
                     return;
                 }
 
-                for call in &calls {
-                    if let Err(error) = self.notify_hooks(&AgentHookEvent::BeforeToolCall {
-                        step,
-                        call: call.clone(),
-                    }).await {
-                        yield Ok(error_event(step, error));
-                        return;
-                    }
+                if let Err(error) = self.notify_before_tool_calls(step, &calls).await {
+                    yield Ok(error_event(step, error));
+                    return;
+                }
+                if let Err(error) = ensure_not_interrupted(&interrupt) {
+                    yield Ok(error_event(step, error));
+                    return;
                 }
                 if let Err(error) = self.remember(assistant.clone()).await {
                     yield Ok(error_event(step, error));
@@ -148,7 +147,7 @@ impl ReActAgent {
                 }
                 history.push(assistant);
 
-                let mut tool_step = self.tool_step(step, calls);
+                let mut tool_step = self.tool_step(step, calls, interrupt.clone());
                 while let Some(item) = tool_step.next().await {
                     match item {
                         ToolStepItem::Event(event) => {
@@ -167,9 +166,22 @@ impl ReActAgent {
         })
     }
 
-    fn model_step(&self, step: usize, request: ChatRequest) -> ModelStepStream<'_> {
+    fn model_step(
+        &self,
+        step: usize,
+        request: ChatRequest,
+        mut interrupt: AgentInterruptToken,
+    ) -> ModelStepStream<'_> {
         Box::pin(stream! {
-            let mut events = match self.model.stream(request).await {
+            let started = tokio::select! {
+                biased;
+                () = interrupt.cancelled() => {
+                    yield ModelStepItem::Event(error_event(step, AgentError::Interrupted));
+                    return;
+                }
+                started = self.model.stream(request) => started,
+            };
+            let mut events = match started {
                 Ok(events) => events,
                 Err(error) => {
                     yield ModelStepItem::Event(error_event(step, AgentError::Model(error)));
@@ -177,7 +189,18 @@ impl ReActAgent {
                 }
             };
             let mut accumulator = ChatResponseAccumulator::new();
-            while let Some(event) = events.next().await {
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    () = interrupt.cancelled() => {
+                        yield ModelStepItem::Event(error_event(step, AgentError::Interrupted));
+                        return;
+                    }
+                    next = events.next() => next,
+                };
+                let Some(event) = next else {
+                    break;
+                };
                 let event = match event {
                     Ok(event) => event,
                     Err(error) => {
@@ -203,7 +226,51 @@ impl ReActAgent {
         })
     }
 
-    fn tool_step(&self, step: usize, calls: Vec<ToolCallBlock>) -> ToolStepStream<'_> {
+    fn finish_streamed_reply<'a>(
+        &'a self,
+        step: usize,
+        finish_reason: Option<FinishReason>,
+        assistant: Msg,
+        interrupt: &'a AgentInterruptToken,
+    ) -> AgentOperation<'a, AgentEvent> {
+        Box::pin(async move {
+            if finish_reason == Some(FinishReason::ToolCalls) {
+                return Err(AgentError::InvalidModelResponse(
+                    "finish reason requested tools, but no tool calls were present".to_owned(),
+                ));
+            }
+            ensure_not_interrupted(interrupt)?;
+            self.remember(assistant.clone()).await?;
+            self.notify_hooks(&AgentHookEvent::AfterReply {
+                steps: step,
+                message: assistant.clone(),
+            })
+            .await?;
+            Ok(AgentEvent::Finished {
+                steps: step,
+                message: assistant,
+            })
+        })
+    }
+
+    async fn max_steps_event(&self, step: usize, assistant: Msg) -> AgentEvent {
+        match self.remember(assistant).await {
+            Ok(()) => error_event(
+                step,
+                AgentError::MaxStepsExceeded {
+                    max_steps: self.max_steps,
+                },
+            ),
+            Err(error) => error_event(step, error),
+        }
+    }
+
+    fn tool_step(
+        &self,
+        step: usize,
+        calls: Vec<ToolCallBlock>,
+        mut interrupt: AgentInterruptToken,
+    ) -> ToolStepStream<'_> {
         Box::pin(stream! {
             for call in &calls {
                 yield ToolStepItem::Event(AgentEvent::ToolStarted {
@@ -211,34 +278,44 @@ impl ReActAgent {
                     call: call.clone(),
                 });
             }
-            let results = match self.tools.execute_all(&calls, ToolContext::new()).await {
-                Ok(results) => results,
-                Err(error) => {
-                    yield ToolStepItem::Event(error_event(step, AgentError::Tool(error)));
-                    return;
+            let execution = tokio::select! {
+                biased;
+                () = interrupt.cancelled() => {
+                    match interrupted_tool_results(&calls) {
+                        Ok(results) => (results, true),
+                        Err(error) => {
+                            yield ToolStepItem::Event(error_event(step, error));
+                            return;
+                        }
+                    }
+                }
+                results = self.tools.execute_all(&calls, ToolContext::new()) => {
+                    match results {
+                        Ok(results) => (results, false),
+                        Err(error) => {
+                            yield ToolStepItem::Event(error_event(step, AgentError::Tool(error)));
+                            return;
+                        }
+                    }
                 }
             };
-            let observation = Msg::new(
-                "tool",
-                Role::Assistant,
-                results.iter().cloned().map(ContentBlock::from),
-            );
-            if let Err(error) = self.remember(observation.clone()).await {
+            let (results, interrupted) = execution;
+            let observation = match self.record_tool_results(step, &results).await {
+                Ok(observation) => observation,
+                Err(error) => {
                 yield ToolStepItem::Event(error_event(step, error));
                 return;
-            }
-            for result in &results {
-                if let Err(error) = self.notify_hooks(&AgentHookEvent::AfterToolCall {
-                    step,
-                    result: result.clone(),
-                }).await {
-                    yield ToolStepItem::Event(error_event(step, error));
-                    return;
                 }
+            };
+            for result in &results {
                 yield ToolStepItem::Event(AgentEvent::ToolFinished {
                     step,
                     result: result.clone(),
                 });
+            }
+            if interrupted {
+                yield ToolStepItem::Event(error_event(step, AgentError::Interrupted));
+                return;
             }
             yield ToolStepItem::Observation(observation);
         })

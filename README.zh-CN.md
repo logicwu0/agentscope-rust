@@ -49,7 +49,10 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 步骤结束、最终回复和终止错误。`ReActAgent::stream` 现已在完整的模型—工具—模型循环中
 实时发送这些事件。只读、可作为 trait 对象使用的异步 `AgentHook` 可以按照确定的注册
 顺序观察回复、外部消息、模型和工具生命周期边界。`Agent::observe` 可以把外部消息写入
-已配置的会话 Memory，而不会触发模型调用。
+已配置的会话 Memory，而不会触发模型调用。可克隆的 `AgentInterruptHandle` 在模型调用、
+流式分片和工具执行周围提供协作式检查点。被中断的工具调用会生成并持久化
+`interrupted` 结果，保证后续会话状态在结构上仍然完整；但中断不会回滚工具已经产生的
+外部副作用。
 
 ```rust
 use std::time::Duration;
@@ -76,6 +79,7 @@ let response = model
 
 ```shell
 cargo run --example hooks
+cargo run --example interruption
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_react
@@ -154,7 +158,8 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 - [x] 实现流式 `ReActAgent` 执行
 - [x] 支持只读异步生命周期 Hook
 - [x] 支持直接观察外部消息
-- [ ] 支持中断和 Human-in-the-loop
+- [x] 支持实例级协作式中断
+- [ ] 支持会话级可恢复中断和 Human-in-the-loop
 - [ ] 支持状态持久化和会话恢复
 - [ ] 提供单 Agent 与多 Agent 示例
 

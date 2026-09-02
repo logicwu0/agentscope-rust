@@ -2,6 +2,7 @@
 
 mod event;
 mod hook;
+mod interrupt;
 mod react;
 
 use std::{fmt, future::Future, pin::Pin};
@@ -18,6 +19,7 @@ use crate::{
 
 pub use event::AgentEvent;
 pub use hook::{AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture, AgentHookResult};
+pub use interrupt::AgentInterruptHandle;
 pub use react::ReActAgent;
 
 /// Result returned by an agent operation.
@@ -42,6 +44,9 @@ pub trait Agent: Send + Sync {
 
     /// Stores an external message in conversation memory without replying.
     fn observe(&self, message: Msg) -> AgentFuture<'_, ()>;
+
+    /// Returns a handle that can interrupt in-flight replies on this agent.
+    fn interrupt_handle(&self) -> AgentInterruptHandle;
 }
 
 /// A configuration or runtime agent failure.
@@ -62,6 +67,8 @@ pub enum AgentError {
     MemoryNotConfigured,
     /// A lifecycle hook failed.
     Hook(AgentHookError),
+    /// The caller interrupted the in-flight agent operation.
+    Interrupted,
     /// The model produced a response that cannot drive the agent loop.
     InvalidModelResponse(String),
     /// The model continued requesting tools after the configured limit.
@@ -83,6 +90,7 @@ impl fmt::Display for AgentError {
                 formatter.write_str("agent operation requires configured conversation memory")
             }
             Self::Hook(error) => write!(formatter, "agent lifecycle hook failed: {error}"),
+            Self::Interrupted => formatter.write_str("agent operation was interrupted"),
             Self::InvalidModelResponse(message) => {
                 write!(formatter, "invalid model response: {message}")
             }
@@ -106,6 +114,7 @@ impl std::error::Error for AgentError {
             Self::EmptyName
             | Self::ZeroMaxSteps
             | Self::MemoryNotConfigured
+            | Self::Interrupted
             | Self::InvalidModelResponse(_)
             | Self::MaxStepsExceeded { .. } => None,
         }

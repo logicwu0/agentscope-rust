@@ -1,15 +1,24 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
+};
 
+use futures_core::Stream;
 use futures_executor::block_on;
 use futures_util::StreamExt;
 use serde_json::json;
 
 use crate::{
     Agent, AgentError, AgentEvent, AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture,
-    ChatEvent, ChatModel, ChatResponse, ContentBlock, FinishReason, GenerateOptions,
-    InMemoryMemory, Memory, MockChatModel, MockTool, ModelError, ModelResult, Msg, ReActAgent,
-    Role, ToolCallBlock, ToolDefinition, ToolExecutor, ToolRegistry, ToolResultOutput,
-    ToolResultState, Usage,
+    AgentInterruptHandle, ChatEvent, ChatEventStream, ChatModel, ChatRequest, ChatResponse,
+    ContentBlock, FinishReason, GenerateOptions, InMemoryMemory, Memory, MockChatModel, MockTool,
+    ModelCapabilities, ModelError, ModelFuture, ModelResult, Msg, ReActAgent, Role, Tool,
+    ToolCallBlock, ToolContext, ToolDefinition, ToolExecutor, ToolFuture, ToolRegistry,
+    ToolResultOutput, ToolResultState, Usage,
 };
 
 fn calculator_definition() -> ToolDefinition {
@@ -102,6 +111,84 @@ impl AgentHook for RejectToolHook {
             } else {
                 Ok(())
             }
+        })
+    }
+}
+
+struct InterruptingStreamModel {
+    handle: Arc<Mutex<Option<AgentInterruptHandle>>>,
+    requests: AtomicUsize,
+}
+
+impl ChatModel for InterruptingStreamModel {
+    fn name(&self) -> &'static str {
+        "interrupting-stream-model"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::all()
+    }
+
+    fn generate(&self, _request: ChatRequest) -> ModelFuture<'_, ChatResponse> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        let handle = self.handle.clone();
+        Box::pin(async move {
+            handle.lock().unwrap().clone().unwrap().interrupt();
+            std::future::pending::<ModelResult<ChatResponse>>().await
+        })
+    }
+
+    fn stream(&self, _request: ChatRequest) -> ModelFuture<'_, ChatEventStream<'_>> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        let handle = self.handle.clone();
+        Box::pin(async move {
+            Ok(Box::pin(InterruptingEventStream {
+                handle,
+                interrupted: false,
+            }) as ChatEventStream<'_>)
+        })
+    }
+}
+
+struct InterruptingEventStream {
+    handle: Arc<Mutex<Option<AgentInterruptHandle>>>,
+    interrupted: bool,
+}
+
+impl Stream for InterruptingEventStream {
+    type Item = ModelResult<ChatEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if !self.interrupted {
+            let handle = self.handle.lock().unwrap().clone().unwrap();
+            self.interrupted = true;
+            handle.interrupt();
+        }
+        Poll::Pending
+    }
+}
+
+struct InterruptingTool {
+    definition: ToolDefinition,
+    handle: Arc<Mutex<Option<AgentInterruptHandle>>>,
+    invocations: AtomicUsize,
+}
+
+impl Tool for InterruptingTool {
+    fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _context: ToolContext,
+    ) -> ToolFuture<'_, ToolResultOutput> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        let handle = self.handle.lock().unwrap().clone().unwrap();
+        Box::pin(async move {
+            handle.interrupt();
+            std::future::pending::<crate::ToolResult<ToolResultOutput>>().await
         })
     }
 }
@@ -363,6 +450,7 @@ fn react_agent_is_object_safe() {
     let reply = block_on(agent.reply(Msg::user("Hello"))).unwrap();
 
     assert_eq!(agent.name(), "Friday");
+    drop(agent.interrupt_handle());
     assert_eq!(
         reply.text_content(""),
         Some("Hello from the agent.".to_owned())
@@ -527,6 +615,133 @@ fn react_agent_stream_converts_start_failures_to_terminal_events() {
             error: AgentError::Model(error),
         } if error.code.as_deref() == Some("unavailable") && error.retryable
     ));
+}
+
+#[test]
+fn react_agent_interrupts_an_inflight_model_stream() {
+    let handle_slot = Arc::new(Mutex::new(None));
+    let model = Arc::new(InterruptingStreamModel {
+        handle: handle_slot.clone(),
+        requests: AtomicUsize::new(0),
+    });
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_model: Arc<dyn ChatModel> = model.clone();
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let agent = ReActAgent::from_shared(
+        "Friday",
+        shared_model,
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_shared_memory(shared_memory);
+    *handle_slot.lock().unwrap() = Some(agent.interrupt_handle());
+
+    let events = block_on(async {
+        agent
+            .stream(Msg::user("Start a long response"))
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    });
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0],
+        AgentEvent::Error {
+            step: Some(1),
+            error: AgentError::Interrupted
+        }
+    ));
+    assert_eq!(model.requests.load(Ordering::SeqCst), 1);
+    let remembered = block_on(memory.messages()).unwrap();
+    assert_eq!(remembered.len(), 1);
+    assert_eq!(remembered[0].role, Role::User);
+}
+
+#[test]
+fn react_agent_interrupts_an_inflight_complete_model_call() {
+    let handle_slot = Arc::new(Mutex::new(None));
+    let model = Arc::new(InterruptingStreamModel {
+        handle: handle_slot.clone(),
+        requests: AtomicUsize::new(0),
+    });
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_model: Arc<dyn ChatModel> = model.clone();
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let agent = ReActAgent::from_shared(
+        "Friday",
+        shared_model,
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_shared_memory(shared_memory);
+    *handle_slot.lock().unwrap() = Some(agent.interrupt_handle());
+
+    let error = block_on(agent.reply(Msg::user("Start a long response"))).unwrap_err();
+
+    assert_eq!(error, AgentError::Interrupted);
+    assert_eq!(model.requests.load(Ordering::SeqCst), 1);
+    let remembered = block_on(memory.messages()).unwrap();
+    assert_eq!(remembered.len(), 1);
+    assert_eq!(remembered[0].role, Role::User);
+}
+
+#[test]
+fn react_agent_closes_interrupted_tool_calls_in_memory() {
+    let handle_slot = Arc::new(Mutex::new(None));
+    let tool = Arc::new(InterruptingTool {
+        definition: calculator_definition(),
+        handle: handle_slot.clone(),
+        invocations: AtomicUsize::new(0),
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(tool.clone()).unwrap();
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let agent = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("mock-model").with_stream(calculator_call_stream()),
+        ToolExecutor::new(registry),
+    )
+    .unwrap()
+    .with_shared_memory(shared_memory);
+    *handle_slot.lock().unwrap() = Some(agent.interrupt_handle());
+
+    let events = block_on(async {
+        agent
+            .stream(Msg::user("What is 6 * 7?"))
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    });
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolFinished { result, .. }
+            if result.state() == ToolResultState::Interrupted
+    )));
+    assert!(matches!(
+        events.last().unwrap(),
+        AgentEvent::Error {
+            step: Some(1),
+            error: AgentError::Interrupted
+        }
+    ));
+    assert_eq!(tool.invocations.load(Ordering::SeqCst), 1);
+    let remembered = block_on(memory.messages()).unwrap();
+    assert_eq!(remembered.len(), 3);
+    let ContentBlock::ToolResult(result) = &remembered[2].content[0] else {
+        panic!("interruption should persist a closing tool result")
+    };
+    assert_eq!(result.state(), ToolResultState::Interrupted);
 }
 
 #[test]

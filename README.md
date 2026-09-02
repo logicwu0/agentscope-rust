@@ -60,7 +60,11 @@ those events in real time across the complete model-tool-model loop. Read-only,
 object-safe asynchronous `AgentHook`s can observe reply, observation, model,
 and tool lifecycle boundaries in deterministic registration order.
 `Agent::observe` stores external messages in configured conversation memory
-without triggering a model call.
+without triggering a model call. A cloneable `AgentInterruptHandle` provides
+cooperative checkpoints around model calls, streaming chunks, and tool
+execution. Interrupted tool calls are closed with persisted `interrupted`
+results so later conversation state remains structurally valid. Cancellation
+does not roll back external side effects already performed by a tool.
 
 ```rust
 use std::time::Duration;
@@ -88,6 +92,7 @@ configuration file:
 
 ```shell
 cargo run --example hooks
+cargo run --example interruption
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react
@@ -167,7 +172,8 @@ after they have been exercised by working examples.
 - [x] Implement streaming `ReActAgent` execution
 - [x] Add read-only asynchronous lifecycle hooks
 - [x] Add direct external-message observation
-- [ ] Add interruption and human-in-the-loop support
+- [x] Add instance-level cooperative interruption
+- [ ] Add per-session resumable interruption and human-in-the-loop support
 - [ ] Add state persistence and session restoration
 - [ ] Provide single-agent and multi-agent examples
 

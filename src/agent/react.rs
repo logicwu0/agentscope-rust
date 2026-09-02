@@ -6,13 +6,13 @@ use std::{fmt, sync::Arc};
 
 use crate::{
     AgentEventStream, AgentHook, AgentHookEvent, ContentBlock, GenerateOptions, Msg, Role,
-    ToolCallBlock,
+    ToolCallBlock, ToolResultBlock, ToolResultState,
     memory::Memory,
     model::{ChatModel, ChatRequest, FinishReason},
     tool::{ToolContext, ToolExecutor},
 };
 
-use super::{Agent, AgentError, AgentFuture, AgentResult};
+use super::{Agent, AgentError, AgentFuture, AgentInterruptHandle, AgentResult};
 
 const DEFAULT_MAX_STEPS: usize = 8;
 
@@ -30,6 +30,7 @@ pub struct ReActAgent {
     options: GenerateOptions,
     memory: Option<Arc<dyn Memory>>,
     hooks: Vec<Arc<dyn AgentHook>>,
+    interrupt: AgentInterruptHandle,
 }
 
 impl ReActAgent {
@@ -68,6 +69,7 @@ impl ReActAgent {
             options: GenerateOptions::new(),
             memory: None,
             hooks: Vec::new(),
+            interrupt: AgentInterruptHandle::new(),
         })
     }
 
@@ -156,6 +158,12 @@ impl ReActAgent {
         &self.tools
     }
 
+    /// Returns a handle for interrupting replies already running on this agent.
+    #[must_use]
+    pub fn interrupt_handle(&self) -> AgentInterruptHandle {
+        self.interrupt.clone()
+    }
+
     /// Stores an external message in configured memory without calling the model.
     ///
     /// # Errors
@@ -184,10 +192,12 @@ impl ReActAgent {
     #[must_use]
     pub fn reply(&self, message: Msg) -> AgentFuture<'_, Msg> {
         Box::pin(async move {
+            let mut interrupt = self.interrupt.token();
             self.notify_hooks(&AgentHookEvent::BeforeReply {
                 message: message.clone(),
             })
             .await?;
+            ensure_not_interrupted(&interrupt)?;
             let mut history = match &self.memory {
                 Some(memory) => memory.messages().await?,
                 None => Vec::new(),
@@ -200,6 +210,7 @@ impl ReActAgent {
             let system_prompt = self.system_prompt.as_ref().map(Msg::system);
 
             for step in 0..self.max_steps {
+                ensure_not_interrupted(&interrupt)?;
                 let request_messages = system_prompt.iter().cloned().chain(history.iter().cloned());
                 let request = ChatRequest::new(request_messages)
                     .with_options(self.options.clone())
@@ -209,7 +220,8 @@ impl ReActAgent {
                     request: request.clone(),
                 })
                 .await?;
-                let response = self.model.generate(request).await?;
+                ensure_not_interrupted(&interrupt)?;
+                let response = self.generate_response(request, &mut interrupt).await?;
                 if !response.is_last {
                     return Err(AgentError::InvalidModelResponse(
                         "complete generation returned a partial response".to_owned(),
@@ -220,6 +232,7 @@ impl ReActAgent {
                     response: response.clone(),
                 })
                 .await?;
+                ensure_not_interrupted(&interrupt)?;
                 let finish_reason = response.finish_reason;
                 let calls = response
                     .tool_calls()
@@ -234,6 +247,7 @@ impl ReActAgent {
                                 .to_owned(),
                         ));
                     }
+                    ensure_not_interrupted(&interrupt)?;
                     if let Some(memory) = &self.memory {
                         memory.append(vec![assistant_message.clone()]).await?;
                     }
@@ -253,33 +267,22 @@ impl ReActAgent {
                         max_steps: self.max_steps,
                     });
                 }
-                for call in &calls {
-                    self.notify_hooks(&AgentHookEvent::BeforeToolCall {
-                        step: step + 1,
-                        call: call.clone(),
-                    })
-                    .await?;
-                }
+                self.notify_before_tool_calls(step + 1, &calls).await?;
+                ensure_not_interrupted(&interrupt)?;
                 if let Some(memory) = &self.memory {
                     memory.append(vec![assistant_message.clone()]).await?;
                 }
                 history.push(assistant_message);
-                let results = self.tools.execute_all(&calls, ToolContext::new()).await?;
-                let observation = Msg::new(
-                    "tool",
-                    Role::Assistant,
-                    results.iter().cloned().map(ContentBlock::from),
-                );
-                if let Some(memory) = &self.memory {
-                    memory.append(vec![observation.clone()]).await?;
-                }
-                for result in &results {
-                    self.notify_hooks(&AgentHookEvent::AfterToolCall {
-                        step: step + 1,
-                        result: result.clone(),
-                    })
-                    .await?;
-                }
+                let results = tokio::select! {
+                    biased;
+                    () = interrupt.cancelled() => {
+                        let results = interrupted_tool_results(&calls)?;
+                        self.record_tool_results(step + 1, &results).await?;
+                        return Err(AgentError::Interrupted);
+                    }
+                    results = self.tools.execute_all(&calls, ToolContext::new()) => results?,
+                };
+                let observation = self.record_tool_results(step + 1, &results).await?;
                 history.push(observation);
             }
 
@@ -293,6 +296,62 @@ impl ReActAgent {
                 hook.on_event(event).await?;
             }
             Ok(())
+        })
+    }
+
+    pub(super) fn record_tool_results<'a>(
+        &'a self,
+        step: usize,
+        results: &'a [ToolResultBlock],
+    ) -> AgentFuture<'a, Msg> {
+        Box::pin(async move {
+            let observation = Msg::new(
+                "tool",
+                Role::Assistant,
+                results.iter().cloned().map(ContentBlock::from),
+            );
+            if let Some(memory) = &self.memory {
+                memory.append(vec![observation.clone()]).await?;
+            }
+            for result in results {
+                self.notify_hooks(&AgentHookEvent::AfterToolCall {
+                    step,
+                    result: result.clone(),
+                })
+                .await?;
+            }
+            Ok(observation)
+        })
+    }
+
+    pub(super) fn notify_before_tool_calls<'a>(
+        &'a self,
+        step: usize,
+        calls: &'a [ToolCallBlock],
+    ) -> AgentFuture<'a, ()> {
+        Box::pin(async move {
+            for call in calls {
+                self.notify_hooks(&AgentHookEvent::BeforeToolCall {
+                    step,
+                    call: call.clone(),
+                })
+                .await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn generate_response<'a>(
+        &'a self,
+        request: ChatRequest,
+        interrupt: &'a mut super::interrupt::AgentInterruptToken,
+    ) -> AgentFuture<'a, crate::ChatResponse> {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                () = interrupt.cancelled() => Err(AgentError::Interrupted),
+                response = self.model.generate(request) => response.map_err(AgentError::Model),
+            }
         })
     }
 }
@@ -313,6 +372,10 @@ impl Agent for ReActAgent {
     fn observe(&self, message: Msg) -> AgentFuture<'_, ()> {
         Self::observe(self, message)
     }
+
+    fn interrupt_handle(&self) -> AgentInterruptHandle {
+        Self::interrupt_handle(self)
+    }
 }
 
 impl fmt::Debug for ReActAgent {
@@ -327,6 +390,32 @@ impl fmt::Debug for ReActAgent {
             .field("options", &self.options)
             .field("has_memory", &self.memory.is_some())
             .field("hooks", &self.hooks.len())
+            .field("interrupt", &self.interrupt)
             .finish()
     }
+}
+
+fn ensure_not_interrupted(token: &super::interrupt::AgentInterruptToken) -> AgentResult<()> {
+    if token.is_interrupted() {
+        Err(AgentError::Interrupted)
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn interrupted_tool_results(
+    calls: &[ToolCallBlock],
+) -> AgentResult<Vec<ToolResultBlock>> {
+    calls
+        .iter()
+        .map(|call| {
+            ToolResultBlock::finished(
+                call.id(),
+                call.name(),
+                "agent operation was interrupted",
+                ToolResultState::Interrupted,
+            )
+            .map_err(|error| AgentError::InvalidModelResponse(error.to_string()))
+        })
+        .collect()
 }
