@@ -5,6 +5,7 @@ mod hook;
 mod interrupt;
 mod react;
 mod state;
+mod store;
 
 use std::{fmt, future::Future, pin::Pin};
 
@@ -23,6 +24,10 @@ pub use hook::{AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture, Agent
 pub use interrupt::AgentInterruptHandle;
 pub use react::ReActAgent;
 pub use state::{AGENT_STATE_VERSION, AgentState};
+pub use store::{
+    InMemoryStateStore, StateKey, StateRecord, StateStore, StateStoreError, StateStoreFuture,
+    StateStoreResult,
+};
 
 /// Result returned by an agent operation.
 pub type AgentResult<T> = Result<T, AgentError>;
@@ -73,6 +78,8 @@ pub enum AgentError {
     Memory(MemoryError),
     /// An operation that requires conversation memory had none configured.
     MemoryNotConfigured,
+    /// Per-session agent state could not be loaded or saved.
+    StateStore(StateStoreError),
     /// The state snapshot uses a format this crate cannot restore.
     UnsupportedStateVersion {
         /// The version found in the snapshot.
@@ -111,6 +118,7 @@ impl fmt::Display for AgentError {
             Self::MemoryNotConfigured => {
                 formatter.write_str("agent operation requires configured conversation memory")
             }
+            Self::StateStore(error) => write!(formatter, "agent state persistence failed: {error}"),
             Self::UnsupportedStateVersion { found, supported } => write!(
                 formatter,
                 "unsupported agent state version {found}; expected {supported}"
@@ -140,6 +148,7 @@ impl std::error::Error for AgentError {
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),
             Self::Memory(error) => Some(error),
+            Self::StateStore(error) => Some(error),
             Self::Hook(error) => Some(error),
             Self::EmptyName
             | Self::ZeroMaxSteps
@@ -168,6 +177,12 @@ impl From<ToolError> for AgentError {
 impl From<MemoryError> for AgentError {
     fn from(error: MemoryError) -> Self {
         Self::Memory(error)
+    }
+}
+
+impl From<StateStoreError> for AgentError {
+    fn from(error: StateStoreError) -> Self {
+        Self::StateStore(error)
     }
 }
 

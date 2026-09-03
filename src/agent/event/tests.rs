@@ -4,7 +4,8 @@ use serde_json::json;
 
 use crate::{
     AgentError, AgentEvent, AgentEventStream, AgentHookError, ChatEvent, ContentBlock,
-    FinishReason, MemoryError, ModelError, Msg, ToolCallBlock, ToolError, ToolResultBlock, Usage,
+    FinishReason, MemoryError, ModelError, Msg, StateStoreError, ToolCallBlock, ToolError,
+    ToolResultBlock, Usage,
 };
 
 #[test]
@@ -146,6 +147,7 @@ fn every_agent_error_variant_round_trips_through_json() {
         AgentError::Tool(ToolError::new("tool failed").with_code("tool_failure")),
         AgentError::Memory(MemoryError::new("memory failed").with_code("memory_failure")),
         AgentError::MemoryNotConfigured,
+        AgentError::StateStore(StateStoreError::new("state failed").with_code("state_failure")),
         AgentError::UnsupportedStateVersion {
             found: 2,
             supported: 1,

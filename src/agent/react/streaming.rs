@@ -35,9 +35,47 @@ impl ReActAgent {
     ///
     /// Runtime failures after the stream is created are emitted once as a
     /// terminal [`AgentEvent::Error`]. Only complete messages are persisted to
-    /// configured memory.
+    /// configured memory. When a state store is bound, callers must poll the
+    /// stream through its terminal event for its final state to be saved.
     #[must_use]
     pub fn stream(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
+        Box::pin(async move {
+            let operation = self.begin_state_operation().await?;
+            let events = match self.stream_without_state_store(message).await {
+                Ok(events) => events,
+                Err(error) => {
+                    self.finish_state_operation(operation).await?;
+                    return Err(error);
+                }
+            };
+            let Some(operation) = operation else {
+                return Ok(events);
+            };
+            Ok(Box::pin(stream! {
+                let mut events = events;
+                let mut operation = Some(operation);
+                while let Some(event) = events.next().await {
+                    let terminal = event.as_ref().map_or(true, |event| matches!(
+                        event,
+                        AgentEvent::Finished { .. } | AgentEvent::Error { .. }
+                    ));
+                    if terminal {
+                        match self.finish_state_operation(operation.take()).await {
+                            Ok(()) => yield event,
+                            Err(error) => yield Ok(AgentEvent::Error { step: None, error }),
+                        }
+                        return;
+                    }
+                    yield event;
+                }
+                if let Err(error) = self.finish_state_operation(operation).await {
+                    yield Ok(AgentEvent::Error { step: None, error });
+                }
+            }) as AgentEventStream<'_>)
+        })
+    }
+
+    fn stream_without_state_store(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
         Box::pin(async move {
             let interrupt = self.interrupt.token();
             self.notify_hooks(&AgentHookEvent::BeforeReply {

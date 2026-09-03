@@ -4,6 +4,8 @@ mod streaming;
 
 use std::{fmt, sync::Arc};
 
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+
 use crate::{
     AgentEventStream, AgentHook, AgentHookEvent, ContentBlock, GenerateOptions, Msg, Role,
     ToolCallBlock, ToolResultBlock, ToolResultState,
@@ -14,7 +16,7 @@ use crate::{
 
 use super::{
     AGENT_STATE_VERSION, Agent, AgentError, AgentFuture, AgentInterruptHandle, AgentResult,
-    AgentState,
+    AgentState, StateKey, StateStore,
 };
 
 const DEFAULT_MAX_STEPS: usize = 8;
@@ -34,6 +36,19 @@ pub struct ReActAgent {
     memory: Option<Arc<dyn Memory>>,
     hooks: Vec<Arc<dyn AgentHook>>,
     interrupt: AgentInterruptHandle,
+    state_binding: Option<Arc<StateBinding>>,
+}
+
+struct StateBinding {
+    key: StateKey,
+    store: Arc<dyn StateStore>,
+    operation: Arc<AsyncMutex<()>>,
+}
+
+struct StateOperation {
+    binding: Arc<StateBinding>,
+    expected_revision: Option<u64>,
+    _guard: OwnedMutexGuard<()>,
 }
 
 impl ReActAgent {
@@ -73,6 +88,7 @@ impl ReActAgent {
             memory: None,
             hooks: Vec::new(),
             interrupt: AgentInterruptHandle::new(),
+            state_binding: None,
         })
     }
 
@@ -126,6 +142,33 @@ impl ReActAgent {
         self.memory.as_ref()
     }
 
+    /// Binds this agent to automatic state loading and saving for one session.
+    ///
+    /// Conversation memory must also be configured. Clones of this agent share
+    /// an operation lock; independent agent instances rely on store revisions
+    /// to detect concurrent updates.
+    #[must_use]
+    pub fn with_state_store<S>(mut self, key: StateKey, store: S) -> Self
+    where
+        S: StateStore + 'static,
+    {
+        self.state_binding = Some(Arc::new(StateBinding::new(key, Arc::new(store))));
+        self
+    }
+
+    /// Binds this agent to a shared state store for one session.
+    #[must_use]
+    pub fn with_shared_state_store(mut self, key: StateKey, store: Arc<dyn StateStore>) -> Self {
+        self.state_binding = Some(Arc::new(StateBinding::new(key, store)));
+        self
+    }
+
+    /// Returns the bound state key, when automatic persistence is configured.
+    #[must_use]
+    pub fn state_key(&self) -> Option<&StateKey> {
+        self.state_binding.as_ref().map(|binding| &binding.key)
+    }
+
     /// Adds an owned read-only lifecycle hook.
     #[must_use]
     pub fn with_hook<H>(mut self, hook: H) -> Self
@@ -176,18 +219,10 @@ impl ReActAgent {
     #[must_use]
     pub fn observe(&self, message: Msg) -> AgentFuture<'_, ()> {
         Box::pin(async move {
-            let memory = self
-                .memory
-                .as_ref()
-                .ok_or(AgentError::MemoryNotConfigured)?;
-            self.notify_hooks(&AgentHookEvent::BeforeObserve {
-                message: message.clone(),
-            })
-            .await?;
-            memory.append(vec![message.clone()]).await?;
-            self.notify_hooks(&AgentHookEvent::AfterObserve { message })
-                .await?;
-            Ok(())
+            let operation = self.begin_state_operation().await?;
+            let result = self.observe_without_state_store(message).await;
+            self.finish_state_operation(operation).await?;
+            result
         })
     }
 
@@ -195,11 +230,10 @@ impl ReActAgent {
     #[must_use]
     pub fn snapshot(&self) -> AgentFuture<'_, AgentState> {
         Box::pin(async move {
-            let memory = self
-                .memory
-                .as_ref()
-                .ok_or(AgentError::MemoryNotConfigured)?;
-            Ok(AgentState::new(self.name.clone(), memory.messages().await?))
+            let operation = self.begin_state_operation().await?;
+            let state = self.snapshot_memory().await;
+            drop(operation);
+            state
         })
     }
 
@@ -207,30 +241,27 @@ impl ReActAgent {
     #[must_use]
     pub fn restore(&self, state: AgentState) -> AgentFuture<'_, ()> {
         Box::pin(async move {
-            let memory = self
-                .memory
-                .as_ref()
-                .ok_or(AgentError::MemoryNotConfigured)?;
-            if state.format_version() != AGENT_STATE_VERSION {
-                return Err(AgentError::UnsupportedStateVersion {
-                    found: state.format_version(),
-                    supported: AGENT_STATE_VERSION,
-                });
+            let operation = self.begin_state_operation().await?;
+            let result = self.restore_memory(state).await;
+            if result.is_ok() {
+                self.finish_state_operation(operation).await?;
             }
-            if state.agent_name() != self.name {
-                return Err(AgentError::StateAgentMismatch {
-                    expected: self.name.clone(),
-                    found: state.agent_name().to_owned(),
-                });
-            }
-            memory.replace(state.into_messages()).await?;
-            Ok(())
+            result
         })
     }
 
     /// Produces one reply using a `ReAct` conversation.
     #[must_use]
     pub fn reply(&self, message: Msg) -> AgentFuture<'_, Msg> {
+        Box::pin(async move {
+            let operation = self.begin_state_operation().await?;
+            let result = self.reply_without_state_store(message).await;
+            self.finish_state_operation(operation).await?;
+            result
+        })
+    }
+
+    fn reply_without_state_store(&self, message: Msg) -> AgentFuture<'_, Msg> {
         Box::pin(async move {
             let mut interrupt = self.interrupt.token();
             self.notify_hooks(&AgentHookEvent::BeforeReply {
@@ -328,6 +359,95 @@ impl ReActAgent {
 
             unreachable!("positive max_steps and loop exits cover all responses")
         })
+    }
+
+    async fn observe_without_state_store(&self, message: Msg) -> AgentResult<()> {
+        let memory = self
+            .memory
+            .as_ref()
+            .ok_or(AgentError::MemoryNotConfigured)?;
+        self.notify_hooks(&AgentHookEvent::BeforeObserve {
+            message: message.clone(),
+        })
+        .await?;
+        memory.append(vec![message.clone()]).await?;
+        self.notify_hooks(&AgentHookEvent::AfterObserve { message })
+            .await?;
+        Ok(())
+    }
+
+    async fn begin_state_operation(&self) -> AgentResult<Option<StateOperation>> {
+        let Some(binding) = self.state_binding.clone() else {
+            return Ok(None);
+        };
+        let memory = self
+            .memory
+            .as_ref()
+            .ok_or(AgentError::MemoryNotConfigured)?;
+        let guard = binding.operation.clone().lock_owned().await;
+        let record = binding.store.load(&binding.key).await?;
+        let expected_revision = record.as_ref().map(super::StateRecord::revision);
+        if let Some(record) = record {
+            let state = record.into_state();
+            self.validate_state(&state)?;
+            memory.replace(state.into_messages()).await?;
+        }
+        Ok(Some(StateOperation {
+            binding,
+            expected_revision,
+            _guard: guard,
+        }))
+    }
+
+    async fn finish_state_operation(&self, operation: Option<StateOperation>) -> AgentResult<()> {
+        let Some(operation) = operation else {
+            return Ok(());
+        };
+        let state = self.snapshot_memory().await?;
+        operation
+            .binding
+            .store
+            .save(
+                operation.binding.key.clone(),
+                operation.expected_revision,
+                state,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn snapshot_memory(&self) -> AgentResult<AgentState> {
+        let memory = self
+            .memory
+            .as_ref()
+            .ok_or(AgentError::MemoryNotConfigured)?;
+        Ok(AgentState::new(self.name.clone(), memory.messages().await?))
+    }
+
+    async fn restore_memory(&self, state: AgentState) -> AgentResult<()> {
+        self.validate_state(&state)?;
+        let memory = self
+            .memory
+            .as_ref()
+            .ok_or(AgentError::MemoryNotConfigured)?;
+        memory.replace(state.into_messages()).await?;
+        Ok(())
+    }
+
+    fn validate_state(&self, state: &AgentState) -> AgentResult<()> {
+        if state.format_version() != AGENT_STATE_VERSION {
+            return Err(AgentError::UnsupportedStateVersion {
+                found: state.format_version(),
+                supported: AGENT_STATE_VERSION,
+            });
+        }
+        if state.agent_name() != self.name {
+            return Err(AgentError::StateAgentMismatch {
+                expected: self.name.clone(),
+                found: state.agent_name().to_owned(),
+            });
+        }
+        Ok(())
     }
 
     pub(super) fn notify_hooks<'a>(&'a self, event: &'a AgentHookEvent) -> AgentFuture<'a, ()> {
@@ -439,7 +559,18 @@ impl fmt::Debug for ReActAgent {
             .field("has_memory", &self.memory.is_some())
             .field("hooks", &self.hooks.len())
             .field("interrupt", &self.interrupt)
+            .field("state_binding", &self.state_key())
             .finish()
+    }
+}
+
+impl StateBinding {
+    fn new(key: StateKey, store: Arc<dyn StateStore>) -> Self {
+        Self {
+            key,
+            store,
+            operation: Arc::new(AsyncMutex::new(())),
+        }
     }
 }
 

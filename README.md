@@ -68,6 +68,10 @@ does not roll back external side effects already performed by a tool. A
 versioned, JSON-serializable `AgentState` can now snapshot and atomically
 restore complete conversation history through the object-safe `Agent` API.
 Runtime interruption controls are intentionally excluded from persisted state.
+The object-safe `StateStore` API now keys records by user and session, protects
+writes with optimistic revision checks, and includes a thread-safe
+`InMemoryStateStore`. A bound `ReActAgent` automatically loads and saves state
+around replies, streams polled through their terminal event, and observations.
 
 ```rust
 use std::time::Duration;
@@ -97,6 +101,7 @@ configuration file:
 cargo run --example hooks
 cargo run --example interruption
 cargo run --example state
+cargo run --example session_state
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react
@@ -115,6 +120,8 @@ let reply = agent.reply(Msg::user("What is 6 * 7?")).await?;
 
 Enable the persistent backend with `features = ["sqlite"]` in your dependency.
 Call `snapshot` or `restore` only while no reply is active on that agent.
+State-bound streams must be polled through their terminal event to perform their
+final save.
 
 ## Roadmap / TODO
 
@@ -179,8 +186,9 @@ after they have been exercised by working examples.
 - [x] Add direct external-message observation
 - [x] Add instance-level cooperative interruption
 - [x] Add versioned manual agent state snapshot and atomic restoration
+- [x] Add a revisioned per-session `StateStore` and automatic restoration
 - [ ] Add per-session resumable interruption and human-in-the-loop support
-- [ ] Add automatic per-session state stores and restoration
+- [ ] Add persistent `StateStore` plugins
 - [ ] Provide single-agent and multi-agent examples
 
 ### Storage Plugins

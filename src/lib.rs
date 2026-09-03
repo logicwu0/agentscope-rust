@@ -11,7 +11,8 @@ pub mod tool;
 pub use agent::{
     AGENT_STATE_VERSION, Agent, AgentError, AgentEvent, AgentEventStream, AgentFuture, AgentHook,
     AgentHookError, AgentHookEvent, AgentHookFuture, AgentHookResult, AgentInterruptHandle,
-    AgentResult, AgentState, ReActAgent,
+    AgentResult, AgentState, InMemoryStateStore, ReActAgent, StateKey, StateRecord, StateStore,
+    StateStoreError, StateStoreFuture, StateStoreResult,
 };
 #[cfg(feature = "sqlite")]
 pub use memory::SQLiteMemory;

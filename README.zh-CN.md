@@ -54,6 +54,9 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 `interrupted` 结果，保证后续会话状态在结构上仍然完整；但中断不会回滚工具已经产生的
 外部副作用。版本化且可序列化为 JSON 的 `AgentState` 现可通过 `Agent` trait 对象接口
 快照完整对话历史，并以原子方式恢复。运行期中断控制不会写入持久化状态。
+可作为 trait 对象使用的 `StateStore` 现会按用户和会话定位记录，通过乐观 revision
+校验保护写入，并提供线程安全的 `InMemoryStateStore`。绑定状态存储后，`ReActAgent`
+会在回复、读取至终止事件的流以及外部消息观察前后自动加载和保存状态。
 
 ```rust
 use std::time::Duration;
@@ -82,6 +85,7 @@ let response = model
 cargo run --example hooks
 cargo run --example interruption
 cargo run --example state
+cargo run --example session_state
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_react
@@ -100,6 +104,7 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 
 在依赖配置中加入 `features = ["sqlite"]` 即可启用持久化后端。
 请仅在目标 Agent 没有正在执行的回复时调用 `snapshot` 或 `restore`。
+绑定状态存储的流必须读取到终止事件，才能执行最终保存。
 
 ## 路线图 / TODO
 
@@ -163,8 +168,9 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 - [x] 支持直接观察外部消息
 - [x] 支持实例级协作式中断
 - [x] 支持版本化的手动 Agent 状态快照与原子恢复
+- [x] 支持带 revision 的会话级 `StateStore` 与自动恢复
 - [ ] 支持会话级可恢复中断和 Human-in-the-loop
-- [ ] 支持自动的会话级状态存储与恢复
+- [ ] 添加持久化 `StateStore` 插件
 - [ ] 提供单 Agent 与多 Agent 示例
 
 ### 存储插件

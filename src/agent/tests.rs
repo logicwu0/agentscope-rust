@@ -11,14 +11,16 @@ use futures_core::Stream;
 use futures_executor::block_on;
 use futures_util::StreamExt;
 use serde_json::json;
+use tokio::sync::Barrier;
 
 use crate::{
     AGENT_STATE_VERSION, Agent, AgentError, AgentEvent, AgentHook, AgentHookError, AgentHookEvent,
     AgentHookFuture, AgentInterruptHandle, AgentState, ChatEvent, ChatEventStream, ChatModel,
-    ChatRequest, ChatResponse, ContentBlock, FinishReason, GenerateOptions, InMemoryMemory, Memory,
-    MockChatModel, MockTool, ModelCapabilities, ModelError, ModelFuture, ModelResult, Msg,
-    ReActAgent, Role, Tool, ToolCallBlock, ToolContext, ToolDefinition, ToolExecutor, ToolFuture,
-    ToolRegistry, ToolResultOutput, ToolResultState, Usage,
+    ChatRequest, ChatResponse, ContentBlock, FinishReason, GenerateOptions, InMemoryMemory,
+    InMemoryStateStore, Memory, MockChatModel, MockTool, ModelCapabilities, ModelError,
+    ModelFuture, ModelResult, Msg, ReActAgent, Role, StateKey, StateStore, Tool, ToolCallBlock,
+    ToolContext, ToolDefinition, ToolExecutor, ToolFuture, ToolRegistry, ToolResultOutput,
+    ToolResultState, Usage,
 };
 
 fn calculator_definition() -> ToolDefinition {
@@ -118,6 +120,32 @@ impl AgentHook for RejectToolHook {
 struct InterruptingStreamModel {
     handle: Arc<Mutex<Option<AgentInterruptHandle>>>,
     requests: AtomicUsize,
+}
+
+struct BarrierModel {
+    barrier: Arc<Barrier>,
+}
+
+impl ChatModel for BarrierModel {
+    fn name(&self) -> &'static str {
+        "barrier-model"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::all()
+    }
+
+    fn generate(&self, _request: ChatRequest) -> ModelFuture<'_, ChatResponse> {
+        let barrier = self.barrier.clone();
+        Box::pin(async move {
+            barrier.wait().await;
+            Ok(ChatResponse::completed([ContentBlock::from("done")]))
+        })
+    }
+
+    fn stream(&self, _request: ChatRequest) -> ModelFuture<'_, ChatEventStream<'_>> {
+        Box::pin(async { Err(ModelError::new("streaming is not used by this test")) })
+    }
 }
 
 impl ChatModel for InterruptingStreamModel {
@@ -539,6 +567,200 @@ fn agent_state_operations_are_object_safe() {
     block_on(agent.restore(state.clone())).unwrap();
 
     assert_eq!(block_on(agent.snapshot()).unwrap(), state);
+}
+
+#[test]
+fn react_agent_automatically_restores_and_saves_a_bound_session() {
+    let key = StateKey::new("user-1", "session-1").unwrap();
+    let store = Arc::new(InMemoryStateStore::new());
+    let first_store: Arc<dyn StateStore> = store.clone();
+    let first = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("first-model")
+            .with_response(ChatResponse::completed([ContentBlock::from("First reply")])),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), first_store);
+
+    block_on(first.reply(Msg::user("First question"))).unwrap();
+    let first_record = block_on(store.load(&key)).unwrap().unwrap();
+    assert_eq!(first_record.revision(), 1);
+    assert_eq!(first_record.state().messages().len(), 2);
+
+    let second_model = Arc::new(MockChatModel::new("second-model").with_response(
+        ChatResponse::completed([ContentBlock::from("Second reply")]),
+    ));
+    let shared_model: Arc<dyn ChatModel> = second_model.clone();
+    let second_store: Arc<dyn StateStore> = store.clone();
+    let second = ReActAgent::from_shared(
+        "Friday",
+        shared_model,
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), second_store);
+
+    block_on(second.reply(Msg::user("Second question"))).unwrap();
+
+    let requests = second_model.recorded_requests();
+    assert_eq!(requests[0].messages.len(), 3);
+    assert_eq!(
+        requests[0].messages[0].text_content(""),
+        Some("First question".to_owned())
+    );
+    let second_record = block_on(store.load(&key)).unwrap().unwrap();
+    assert_eq!(second_record.revision(), 2);
+    assert_eq!(second_record.state().messages().len(), 4);
+}
+
+#[test]
+fn react_agent_automatically_persists_observations() {
+    let key = StateKey::new("user-1", "observations").unwrap();
+    let store = Arc::new(InMemoryStateStore::new());
+    let shared_store: Arc<dyn StateStore> = store.clone();
+    let agent = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("mock-model"),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), shared_store);
+
+    block_on(agent.observe(Msg::assistant("planner", "Use exact arithmetic."))).unwrap();
+
+    let record = block_on(store.load(&key)).unwrap().unwrap();
+    assert_eq!(record.revision(), 1);
+    assert_eq!(record.state().messages().len(), 1);
+}
+
+#[test]
+fn cloned_agents_serialize_updates_to_their_bound_session() {
+    let key = StateKey::new("user-1", "shared-clones").unwrap();
+    let store = Arc::new(InMemoryStateStore::new());
+    let shared_store: Arc<dyn StateStore> = store.clone();
+    let model = Arc::new(
+        MockChatModel::new("mock-model")
+            .with_response(ChatResponse::completed([ContentBlock::from("First")]))
+            .with_response(ChatResponse::completed([ContentBlock::from("Second")])),
+    );
+    let shared_model: Arc<dyn ChatModel> = model.clone();
+    let agent = ReActAgent::from_shared(
+        "Friday",
+        shared_model,
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), shared_store);
+    let cloned = agent.clone();
+
+    let (first, second) = block_on(futures_util::future::join(
+        agent.reply(Msg::user("First question")),
+        cloned.reply(Msg::user("Second question")),
+    ));
+
+    first.unwrap();
+    second.unwrap();
+    let request_lengths = model
+        .recorded_requests()
+        .iter()
+        .map(|request| request.messages.len())
+        .collect::<Vec<_>>();
+    assert_eq!(request_lengths, [1, 3]);
+    let record = block_on(store.load(&key)).unwrap().unwrap();
+    assert_eq!(record.revision(), 2);
+    assert_eq!(record.state().messages().len(), 4);
+}
+
+#[tokio::test]
+async fn independent_agents_report_concurrent_state_conflicts() {
+    let key = StateKey::new("user-1", "concurrent").unwrap();
+    let store = Arc::new(InMemoryStateStore::new());
+    let barrier = Arc::new(Barrier::new(2));
+    let first_store: Arc<dyn StateStore> = store.clone();
+    let second_store: Arc<dyn StateStore> = store.clone();
+    let first = ReActAgent::new(
+        "Friday",
+        BarrierModel {
+            barrier: barrier.clone(),
+        },
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), first_store);
+    let second = ReActAgent::new(
+        "Friday",
+        BarrierModel { barrier },
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), second_store);
+
+    let (first_result, second_result) = tokio::join!(
+        first.reply(Msg::user("first")),
+        second.reply(Msg::user("second"))
+    );
+
+    assert_ne!(first_result.is_ok(), second_result.is_ok());
+    let conflict = first_result.err().or_else(|| second_result.err()).unwrap();
+    assert!(matches!(
+        conflict,
+        AgentError::StateStore(error)
+            if error.code.as_deref() == Some("revision_conflict") && error.retryable
+    ));
+    let record = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(record.revision(), 1);
+    assert_eq!(record.state().messages().len(), 2);
+}
+
+#[test]
+fn react_agent_persists_state_before_yielding_the_terminal_event() {
+    let key = StateKey::new("user-1", "stream").unwrap();
+    let store = Arc::new(InMemoryStateStore::new());
+    let shared_store: Arc<dyn StateStore> = store.clone();
+    let agent = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("mock-model").with_stream(final_answer_stream()),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), shared_store);
+
+    block_on(async {
+        let mut events = agent.stream(Msg::user("Stream a reply")).await.unwrap();
+        while let Some(event) = events.next().await {
+            if matches!(event.unwrap(), AgentEvent::Finished { .. }) {
+                break;
+            }
+        }
+    });
+
+    let record = block_on(store.load(&key)).unwrap().unwrap();
+    assert_eq!(record.revision(), 1);
+    assert_eq!(record.state().messages().len(), 2);
+}
+
+#[test]
+fn state_store_binding_requires_conversation_memory() {
+    let key = StateKey::new("user-1", "session-1").unwrap();
+    let agent = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("mock-model"),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_state_store(key, InMemoryStateStore::new());
+
+    let error = block_on(agent.reply(Msg::user("Hello"))).unwrap_err();
+
+    assert_eq!(error, AgentError::MemoryNotConfigured);
 }
 
 #[test]
