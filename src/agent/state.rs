@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::Msg;
 
+use super::PendingToolCalls;
+
 /// The state format version emitted by this crate.
-pub const AGENT_STATE_VERSION: u32 = 1;
+pub const AGENT_STATE_VERSION: u32 = 2;
 
 /// A complete, restartable snapshot of one agent's conversation state.
 ///
@@ -17,6 +19,8 @@ pub struct AgentState {
     format_version: u32,
     agent_name: String,
     messages: Vec<Msg>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_tool_calls: Option<PendingToolCalls>,
 }
 
 impl AgentState {
@@ -27,6 +31,7 @@ impl AgentState {
             format_version: AGENT_STATE_VERSION,
             agent_name: agent_name.into(),
             messages,
+            pending_tool_calls: None,
         }
     }
 
@@ -48,8 +53,19 @@ impl AgentState {
         &self.messages
     }
 
-    pub(crate) fn into_messages(self) -> Vec<Msg> {
-        self.messages
+    /// Returns the tool calls awaiting human confirmation, when paused.
+    #[must_use]
+    pub const fn pending_tool_calls(&self) -> Option<&PendingToolCalls> {
+        self.pending_tool_calls.as_ref()
+    }
+
+    pub(crate) fn with_pending_tool_calls(mut self, pending: Option<PendingToolCalls>) -> Self {
+        self.pending_tool_calls = pending;
+        self
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<Msg>, Option<PendingToolCalls>) {
+        (self.messages, self.pending_tool_calls)
     }
 }
 

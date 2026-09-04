@@ -57,6 +57,9 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 可作为 trait 对象使用的 `StateStore` 现会按用户和会话定位记录，通过乐观 revision
 校验保护写入，并提供线程安全的 `InMemoryStateStore`。绑定状态存储后，`ReActAgent`
 会在回复、读取至终止事件的流以及外部消息观察前后自动加载和保存状态。
+现在可以把指定工具配置为必须经过人工确认。Agent 会持久化 `PendingToolCalls`
+检查点并发出结构化暂停结果；暂停期间拒绝无关消息，收到逐个工具的批准或拒绝决定后
+继续执行。被拒绝的调用会转换为模型可见的 `denied` 工具结果。
 
 ```rust
 use std::time::Duration;
@@ -86,6 +89,7 @@ cargo run --example hooks
 cargo run --example interruption
 cargo run --example state
 cargo run --example session_state
+cargo run --example tool_confirmation
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='你的-key' cargo run --example deepseek_react
@@ -105,6 +109,8 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 在依赖配置中加入 `features = ["sqlite"]` 即可启用持久化后端。
 请仅在目标 Agent 没有正在执行的回复时调用 `snapshot` 或 `restore`。
 绑定状态存储的流必须读取到终止事件，才能执行最终保存。
+获批工具仍应设计成幂等操作：当前首版检查点尚不能保证进程在工具执行中、状态保存前
+崩溃时，外部副作用严格只发生一次。
 
 ## 路线图 / TODO
 
@@ -169,7 +175,9 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 - [x] 支持实例级协作式中断
 - [x] 支持版本化的手动 Agent 状态快照与原子恢复
 - [x] 支持带 revision 的会话级 `StateStore` 与自动恢复
-- [ ] 支持会话级可恢复中断和 Human-in-the-loop
+- [x] 支持持久化的工具确认检查点与恢复决定
+- [ ] 支持外部工具执行与持久化权限规则
+- [ ] 支持会话级可恢复中断
 - [ ] 添加持久化 `StateStore` 插件
 - [ ] 提供单 Agent 与多 Agent 示例
 

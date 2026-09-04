@@ -1,5 +1,6 @@
 //! Agent interfaces and built-in implementations.
 
+mod confirmation;
 mod event;
 mod hook;
 mod interrupt;
@@ -19,6 +20,7 @@ use crate::{
     tool::ToolError,
 };
 
+pub use confirmation::{PendingToolCalls, ToolConfirmation, ToolConfirmationDecision};
 pub use event::AgentEvent;
 pub use hook::{AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture, AgentHookResult};
 pub use interrupt::AgentInterruptHandle;
@@ -58,6 +60,13 @@ pub trait Agent: Send + Sync {
     /// Atomically restores a previously captured conversation state.
     fn restore(&self, state: AgentState) -> AgentFuture<'_, ()>;
 
+    /// Resumes a reply paused for explicit tool-call confirmation.
+    fn resume_tool_calls(
+        &self,
+        reply_id: String,
+        confirmations: Vec<ToolConfirmation>,
+    ) -> AgentFuture<'_, Msg>;
+
     /// Returns a handle that can interrupt in-flight replies on this agent.
     fn interrupt_handle(&self) -> AgentInterruptHandle;
 }
@@ -78,6 +87,15 @@ pub enum AgentError {
     Memory(MemoryError),
     /// An operation that requires conversation memory had none configured.
     MemoryNotConfigured,
+    /// Execution paused until explicit decisions are supplied for tool calls.
+    ToolConfirmationRequired {
+        /// The persisted checkpoint needed to resume safely.
+        checkpoint: PendingToolCalls,
+    },
+    /// No tool-confirmation checkpoint exists for this session.
+    NoPendingToolConfirmation,
+    /// Confirmation input did not match the persisted checkpoint.
+    InvalidToolConfirmation(String),
     /// Per-session agent state could not be loaded or saved.
     StateStore(StateStoreError),
     /// The state snapshot uses a format this crate cannot restore.
@@ -118,6 +136,17 @@ impl fmt::Display for AgentError {
             Self::MemoryNotConfigured => {
                 formatter.write_str("agent operation requires configured conversation memory")
             }
+            Self::ToolConfirmationRequired { checkpoint } => write!(
+                formatter,
+                "agent is waiting for confirmation of reply {}",
+                checkpoint.reply_id()
+            ),
+            Self::NoPendingToolConfirmation => {
+                formatter.write_str("agent has no pending tool confirmation")
+            }
+            Self::InvalidToolConfirmation(message) => {
+                write!(formatter, "invalid tool confirmation: {message}")
+            }
             Self::StateStore(error) => write!(formatter, "agent state persistence failed: {error}"),
             Self::UnsupportedStateVersion { found, supported } => write!(
                 formatter,
@@ -153,6 +182,9 @@ impl std::error::Error for AgentError {
             Self::EmptyName
             | Self::ZeroMaxSteps
             | Self::MemoryNotConfigured
+            | Self::ToolConfirmationRequired { .. }
+            | Self::NoPendingToolConfirmation
+            | Self::InvalidToolConfirmation(_)
             | Self::UnsupportedStateVersion { .. }
             | Self::StateAgentMismatch { .. }
             | Self::Interrupted

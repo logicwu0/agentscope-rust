@@ -9,6 +9,7 @@ use crate::{
 };
 
 use super::AgentError;
+use super::PendingToolCalls;
 
 /// An incremental event emitted while an agent produces a reply.
 ///
@@ -83,6 +84,11 @@ pub enum AgentEvent {
         step: usize,
         /// The successful or failed tool result.
         result: ToolResultBlock,
+    },
+    /// Execution paused before tools that require explicit user confirmation.
+    ToolConfirmationRequired {
+        /// The persisted checkpoint needed to resume the reply.
+        checkpoint: PendingToolCalls,
     },
     /// The agent completed its reply.
     Finished {

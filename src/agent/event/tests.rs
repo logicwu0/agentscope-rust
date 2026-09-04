@@ -4,8 +4,8 @@ use serde_json::json;
 
 use crate::{
     AgentError, AgentEvent, AgentEventStream, AgentHookError, ChatEvent, ContentBlock,
-    FinishReason, MemoryError, ModelError, Msg, StateStoreError, ToolCallBlock, ToolError,
-    ToolResultBlock, Usage,
+    FinishReason, MemoryError, ModelError, Msg, PendingToolCalls, StateStoreError, ToolCallBlock,
+    ToolCallState, ToolError, ToolResultBlock, Usage,
 };
 
 #[test]
@@ -94,6 +94,9 @@ fn model_events_lift_into_their_agent_step() {
 #[test]
 fn lifecycle_events_round_trip_through_json() {
     let call = ToolCallBlock::complete("call-1", "calculator", r#"{"value":42}"#).unwrap();
+    let mut asking_call = call.clone();
+    asking_call.state = ToolCallState::Asking;
+    let checkpoint = PendingToolCalls::new("reply-1".to_owned(), 1, vec![asking_call]);
     let result = ToolResultBlock::success("call-1", "calculator", "42").unwrap();
     let events = vec![
         AgentEvent::ToolStarted {
@@ -101,6 +104,9 @@ fn lifecycle_events_round_trip_through_json() {
             call: call.clone(),
         },
         AgentEvent::ToolFinished { step: 1, result },
+        AgentEvent::ToolConfirmationRequired {
+            checkpoint: checkpoint.clone(),
+        },
         AgentEvent::Finished {
             steps: 2,
             message: Msg::assistant("Friday", "42"),
@@ -117,8 +123,10 @@ fn lifecycle_events_round_trip_through_json() {
     assert_eq!(decoded, events);
     assert_eq!(encoded[0]["type"], "tool_started");
     assert_eq!(encoded[0]["call"]["id"], call.id());
-    assert_eq!(encoded[3]["error"]["kind"], "max_steps_exceeded");
-    assert!(encoded[3].get("step").is_none());
+    assert_eq!(encoded[2]["type"], "tool_confirmation_required");
+    assert_eq!(encoded[2]["checkpoint"]["reply_id"], checkpoint.reply_id());
+    assert_eq!(encoded[4]["error"]["kind"], "max_steps_exceeded");
+    assert!(encoded[4].get("step").is_none());
 }
 
 #[test]
@@ -147,6 +155,15 @@ fn every_agent_error_variant_round_trips_through_json() {
         AgentError::Tool(ToolError::new("tool failed").with_code("tool_failure")),
         AgentError::Memory(MemoryError::new("memory failed").with_code("memory_failure")),
         AgentError::MemoryNotConfigured,
+        AgentError::ToolConfirmationRequired {
+            checkpoint: {
+                let mut call = ToolCallBlock::complete("call-confirm", "calculator", "{}").unwrap();
+                call.state = ToolCallState::Asking;
+                PendingToolCalls::new("reply-confirm".to_owned(), 1, vec![call])
+            },
+        },
+        AgentError::NoPendingToolConfirmation,
+        AgentError::InvalidToolConfirmation("missing decision".to_owned()),
         AgentError::StateStore(StateStoreError::new("state failed").with_code("state_failure")),
         AgentError::UnsupportedStateVersion {
             found: 2,

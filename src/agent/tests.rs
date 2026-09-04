@@ -19,8 +19,8 @@ use crate::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, GenerateOptions, InMemoryMemory,
     InMemoryStateStore, Memory, MockChatModel, MockTool, ModelCapabilities, ModelError,
     ModelFuture, ModelResult, Msg, ReActAgent, Role, StateKey, StateStore, Tool, ToolCallBlock,
-    ToolContext, ToolDefinition, ToolExecutor, ToolFuture, ToolRegistry, ToolResultOutput,
-    ToolResultState, Usage,
+    ToolCallState, ToolConfirmation, ToolContext, ToolDefinition, ToolExecutor, ToolFuture,
+    ToolRegistry, ToolResultOutput, ToolResultState, Usage,
 };
 
 fn calculator_definition() -> ToolDefinition {
@@ -289,6 +289,220 @@ fn react_agent_completes_a_model_tool_model_loop() {
 }
 
 #[test]
+fn react_agent_pauses_and_resumes_an_approved_tool_call() {
+    let call =
+        ToolCallBlock::complete("call-confirm-1", "calculator", r#"{"expression":"6*7"}"#).unwrap();
+    let model = Arc::new(
+        MockChatModel::new("mock-model")
+            .with_response(ChatResponse::finished(
+                [ContentBlock::from(call)],
+                FinishReason::ToolCalls,
+            ))
+            .with_response(ChatResponse::completed([ContentBlock::from("42")])),
+    );
+    let tool = Arc::new(MockTool::new(calculator_definition()).with_output("42"));
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(tool.clone()).unwrap();
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let shared_model: Arc<dyn ChatModel> = model.clone();
+    let agent = ReActAgent::from_shared("Friday", shared_model, ToolExecutor::new(registry))
+        .unwrap()
+        .with_shared_memory(shared_memory)
+        .with_tool_confirmation_required("calculator");
+
+    let paused = block_on(agent.reply(Msg::user("What is 6 * 7?"))).unwrap_err();
+    let AgentError::ToolConfirmationRequired { checkpoint } = paused else {
+        panic!("tool call should pause for confirmation")
+    };
+    assert_eq!(checkpoint.calls().len(), 1);
+    assert_eq!(checkpoint.calls()[0].state, ToolCallState::Asking);
+    assert!(tool.recorded_invocations().is_empty());
+
+    let unrelated = block_on(agent.reply(Msg::user("Ignore that and say hello"))).unwrap_err();
+    assert!(matches!(
+        unrelated,
+        AgentError::ToolConfirmationRequired { .. }
+    ));
+    assert_eq!(model.recorded_requests().len(), 1);
+
+    let reply = block_on(agent.resume_tool_calls(
+        checkpoint.reply_id(),
+        vec![ToolConfirmation::approve("call-confirm-1")],
+    ))
+    .unwrap();
+
+    assert_eq!(reply.text_content(""), Some("42".to_owned()));
+    assert_eq!(tool.recorded_invocations().len(), 1);
+    let state = block_on(agent.snapshot()).unwrap();
+    assert!(state.pending_tool_calls().is_none());
+    assert_eq!(state.messages().len(), 4);
+    let ContentBlock::ToolCall(stored_call) = &state.messages()[1].content[0] else {
+        panic!("assistant reply should contain the tool call")
+    };
+    assert_eq!(stored_call.state, ToolCallState::Finished);
+}
+
+#[test]
+fn react_agent_denies_a_tool_without_executing_it() {
+    let call =
+        ToolCallBlock::complete("call-confirm-2", "calculator", r#"{"expression":"6*7"}"#).unwrap();
+    let model = MockChatModel::new("mock-model")
+        .with_response(ChatResponse::finished(
+            [ContentBlock::from(call)],
+            FinishReason::ToolCalls,
+        ))
+        .with_response(ChatResponse::completed([ContentBlock::from(
+            "I cannot run that tool.",
+        )]));
+    let tool = Arc::new(MockTool::new(calculator_definition()).with_output("42"));
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(tool.clone()).unwrap();
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let agent = ReActAgent::new("Friday", model, ToolExecutor::new(registry))
+        .unwrap()
+        .with_shared_memory(shared_memory)
+        .with_tool_confirmation_required("calculator");
+    let paused = block_on(agent.reply(Msg::user("Run the calculator"))).unwrap_err();
+    let AgentError::ToolConfirmationRequired { checkpoint } = paused else {
+        panic!("tool call should pause for confirmation")
+    };
+
+    let reply = block_on(agent.resume_tool_calls(
+        checkpoint.reply_id(),
+        vec![ToolConfirmation::deny(
+            "call-confirm-2",
+            "User denied execution",
+        )],
+    ))
+    .unwrap();
+
+    assert_eq!(
+        reply.text_content(""),
+        Some("I cannot run that tool.".to_owned())
+    );
+    assert!(tool.recorded_invocations().is_empty());
+    let remembered = block_on(memory.messages()).unwrap();
+    let ContentBlock::ToolResult(result) = &remembered[2].content[0] else {
+        panic!("denial should create a tool result")
+    };
+    assert_eq!(result.state(), ToolResultState::Denied);
+    assert_eq!(
+        result.output(),
+        &ToolResultOutput::Text("User denied execution".to_owned())
+    );
+}
+
+#[test]
+fn react_agent_rejects_invalid_confirmations_without_losing_the_checkpoint() {
+    let call =
+        ToolCallBlock::complete("call-confirm-3", "calculator", r#"{"expression":"1+1"}"#).unwrap();
+    let model = MockChatModel::new("mock-model")
+        .with_response(ChatResponse::finished(
+            [ContentBlock::from(call)],
+            FinishReason::ToolCalls,
+        ))
+        .with_response(ChatResponse::completed([ContentBlock::from("done")]));
+    let tool = Arc::new(MockTool::new(calculator_definition()).with_output("ok"));
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(tool.clone()).unwrap();
+    let agent = ReActAgent::new("Friday", model, ToolExecutor::new(registry))
+        .unwrap()
+        .with_memory(InMemoryMemory::new())
+        .with_tool_confirmation_required("calculator");
+    let paused = block_on(agent.reply(Msg::user("Run it"))).unwrap_err();
+    let AgentError::ToolConfirmationRequired { checkpoint } = paused else {
+        panic!("tool call should pause for confirmation")
+    };
+
+    let wrong_reply = block_on(agent.resume_tool_calls(
+        "wrong-reply",
+        vec![ToolConfirmation::approve("call-confirm-3")],
+    ))
+    .unwrap_err();
+    assert!(matches!(
+        wrong_reply,
+        AgentError::InvalidToolConfirmation(_)
+    ));
+    let missing = block_on(agent.resume_tool_calls(checkpoint.reply_id(), Vec::new())).unwrap_err();
+    assert!(matches!(missing, AgentError::InvalidToolConfirmation(_)));
+    assert!(tool.recorded_invocations().is_empty());
+
+    block_on(agent.resume_tool_calls(
+        checkpoint.reply_id(),
+        vec![ToolConfirmation::approve("call-confirm-3")],
+    ))
+    .unwrap();
+    assert_eq!(tool.recorded_invocations().len(), 1);
+    assert_eq!(
+        block_on(agent.resume_tool_calls(checkpoint.reply_id(), Vec::new())).unwrap_err(),
+        AgentError::NoPendingToolConfirmation
+    );
+}
+
+#[test]
+fn state_store_restores_a_pending_tool_call_in_a_new_agent() {
+    let key = StateKey::new("user-1", "hitl-restart").unwrap();
+    let store = Arc::new(InMemoryStateStore::new());
+    let first_store: Arc<dyn StateStore> = store.clone();
+    let call =
+        ToolCallBlock::complete("call-confirm-4", "calculator", r#"{"expression":"1+1"}"#).unwrap();
+    let first_tool = Arc::new(MockTool::new(calculator_definition()).with_output("unused"));
+    let mut first_registry = ToolRegistry::new();
+    first_registry.register_shared(first_tool.clone()).unwrap();
+    let first = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("first-model").with_response(ChatResponse::finished(
+            [ContentBlock::from(call)],
+            FinishReason::ToolCalls,
+        )),
+        ToolExecutor::new(first_registry),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), first_store)
+    .with_tool_confirmation_required("calculator");
+    let paused = block_on(first.reply(Msg::user("Run after restart"))).unwrap_err();
+    let AgentError::ToolConfirmationRequired { checkpoint } = paused else {
+        panic!("tool call should pause for confirmation")
+    };
+    assert!(first_tool.recorded_invocations().is_empty());
+    let saved = block_on(store.load(&key)).unwrap().unwrap();
+    assert_eq!(saved.revision(), 1);
+    assert!(saved.state().pending_tool_calls().is_some());
+
+    let resumed_tool = Arc::new(MockTool::new(calculator_definition()).with_output("resumed"));
+    let mut resumed_registry = ToolRegistry::new();
+    resumed_registry
+        .register_shared(resumed_tool.clone())
+        .unwrap();
+    let resumed_store: Arc<dyn StateStore> = store.clone();
+    let resumed = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("resumed-model")
+            .with_response(ChatResponse::completed([ContentBlock::from("finished")])),
+        ToolExecutor::new(resumed_registry),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), resumed_store)
+    .with_tool_confirmation_required("calculator");
+
+    let reply = block_on(resumed.resume_tool_calls(
+        checkpoint.reply_id(),
+        vec![ToolConfirmation::approve("call-confirm-4")],
+    ))
+    .unwrap();
+
+    assert_eq!(reply.text_content(""), Some("finished".to_owned()));
+    assert_eq!(resumed_tool.recorded_invocations().len(), 1);
+    let saved = block_on(store.load(&key)).unwrap().unwrap();
+    assert_eq!(saved.revision(), 2);
+    assert!(saved.state().pending_tool_calls().is_none());
+}
+
+#[test]
 fn react_agent_runs_lifecycle_hooks_in_registration_order() {
     let call =
         ToolCallBlock::complete("call-hook-1", "calculator", r#"{"expression":"6*7"}"#).unwrap();
@@ -550,6 +764,30 @@ fn react_agent_requires_memory_for_state_operations() {
 }
 
 #[test]
+fn react_agent_restores_legacy_version_one_state() {
+    let message = Msg::user("legacy history");
+    let legacy: AgentState = serde_json::from_value(json!({
+        "format_version": 1,
+        "agent_name": "Friday",
+        "messages": [message.clone()],
+    }))
+    .unwrap();
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let agent = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("mock-model"),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_shared_memory(shared_memory);
+
+    block_on(agent.restore(legacy)).unwrap();
+
+    assert_eq!(block_on(memory.messages()).unwrap(), [message]);
+}
+
+#[test]
 fn agent_state_operations_are_object_safe() {
     let memory = Arc::new(InMemoryMemory::from_messages([Msg::user("Hello")]));
     let shared_memory: Arc<dyn Memory> = memory;
@@ -802,6 +1040,10 @@ fn react_agent_is_object_safe() {
         events.last().unwrap().as_ref().unwrap(),
         AgentEvent::Finished { steps: 1, .. }
     ));
+    assert_eq!(
+        block_on(agent.resume_tool_calls("missing".to_owned(), Vec::new())).unwrap_err(),
+        AgentError::NoPendingToolConfirmation
+    );
 }
 
 #[test]
@@ -878,6 +1120,41 @@ fn react_agent_streams_a_complete_model_tool_model_loop() {
     assert_eq!(model.recorded_requests().len(), 2);
     assert_eq!(model.recorded_requests()[1].messages.len(), 3);
     assert_eq!(block_on(memory.messages()).unwrap().len(), 4);
+}
+
+#[test]
+fn react_agent_stream_emits_and_persists_a_confirmation_checkpoint() {
+    let key = StateKey::new("user-1", "hitl-stream").unwrap();
+    let store = Arc::new(InMemoryStateStore::new());
+    let shared_store: Arc<dyn StateStore> = store.clone();
+    let tool = Arc::new(MockTool::new(calculator_definition()).with_output("42"));
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(tool.clone()).unwrap();
+    let agent = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("mock-model").with_stream(calculator_call_stream()),
+        ToolExecutor::new(registry),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), shared_store)
+    .with_tool_confirmation_required("calculator");
+
+    let checkpoint = block_on(async {
+        let mut events = agent.stream(Msg::user("What is 6 * 7?")).await.unwrap();
+        loop {
+            match events.next().await.unwrap().unwrap() {
+                AgentEvent::ToolConfirmationRequired { checkpoint } => break checkpoint,
+                _ => continue,
+            }
+        }
+    });
+
+    assert_eq!(checkpoint.calls()[0].id(), "call-stream-1");
+    assert!(tool.recorded_invocations().is_empty());
+    let saved = block_on(store.load(&key)).unwrap().unwrap();
+    assert_eq!(saved.revision(), 1);
+    assert_eq!(saved.state().pending_tool_calls(), Some(&checkpoint));
 }
 
 #[test]

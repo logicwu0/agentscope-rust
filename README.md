@@ -72,6 +72,10 @@ The object-safe `StateStore` API now keys records by user and session, protects
 writes with optimistic revision checks, and includes a thread-safe
 `InMemoryStateStore`. A bound `ReActAgent` automatically loads and saves state
 around replies, streams polled through their terminal event, and observations.
+Named tools can now require explicit human confirmation. The agent persists a
+`PendingToolCalls` checkpoint, emits a structured pause outcome, rejects
+unrelated messages while paused, and resumes with per-call approve or deny
+decisions. Denied calls become model-visible `denied` tool results.
 
 ```rust
 use std::time::Duration;
@@ -102,6 +106,7 @@ cargo run --example hooks
 cargo run --example interruption
 cargo run --example state
 cargo run --example session_state
+cargo run --example tool_confirmation
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_stream
 DEEPSEEK_API_KEY='your-key' cargo run --example deepseek_react
@@ -122,6 +127,9 @@ Enable the persistent backend with `features = ["sqlite"]` in your dependency.
 Call `snapshot` or `restore` only while no reply is active on that agent.
 State-bound streams must be polled through their terminal event to perform their
 final save.
+Approved tools should still be idempotent: this first checkpoint implementation
+does not yet guarantee exactly-once external side effects if a process crashes
+during tool execution before the resolved state is saved.
 
 ## Roadmap / TODO
 
@@ -187,7 +195,9 @@ after they have been exercised by working examples.
 - [x] Add instance-level cooperative interruption
 - [x] Add versioned manual agent state snapshot and atomic restoration
 - [x] Add a revisioned per-session `StateStore` and automatic restoration
-- [ ] Add per-session resumable interruption and human-in-the-loop support
+- [x] Add persisted tool-confirmation checkpoints and resume decisions
+- [ ] Add external tool execution and persisted permission rules
+- [ ] Add per-session resumable interruption
 - [ ] Add persistent `StateStore` plugins
 - [ ] Provide single-agent and multi-agent examples
 

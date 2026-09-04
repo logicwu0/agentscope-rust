@@ -57,7 +57,9 @@ impl ReActAgent {
                 while let Some(event) = events.next().await {
                     let terminal = event.as_ref().map_or(true, |event| matches!(
                         event,
-                        AgentEvent::Finished { .. } | AgentEvent::Error { .. }
+                        AgentEvent::Finished { .. }
+                            | AgentEvent::ToolConfirmationRequired { .. }
+                            | AgentEvent::Error { .. }
                     ));
                     if terminal {
                         match self.finish_state_operation(operation.take()).await {
@@ -78,6 +80,11 @@ impl ReActAgent {
     fn stream_without_state_store(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
         Box::pin(async move {
             let interrupt = self.interrupt.token();
+            if let Some(pending) = super::lock(&self.pending_tool_calls).clone() {
+                return Err(AgentError::ToolConfirmationRequired {
+                    checkpoint: pending,
+                });
+            }
             self.notify_hooks(&AgentHookEvent::BeforeReply {
                 message: message.clone(),
             })
@@ -171,6 +178,11 @@ impl ReActAgent {
                     return;
                 }
 
+                if self.requires_confirmation(&calls) {
+                    yield Ok(self.tool_confirmation_event(step, assistant).await);
+                    return;
+                }
+
                 if let Err(error) = self.notify_before_tool_calls(step, &calls).await {
                     yield Ok(error_event(step, error));
                     return;
@@ -202,6 +214,13 @@ impl ReActAgent {
                 }
             }
         })
+    }
+
+    async fn tool_confirmation_event(&self, step: usize, assistant: Msg) -> AgentEvent {
+        match self.pause_for_confirmation(step, assistant).await {
+            Ok(checkpoint) => AgentEvent::ToolConfirmationRequired { checkpoint },
+            Err(error) => error_event(step, error),
+        }
     }
 
     fn model_step(
