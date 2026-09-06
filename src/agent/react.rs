@@ -9,18 +9,20 @@ use std::{
 };
 
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use uuid::Uuid;
 
 use crate::{
     AgentEventStream, AgentHook, AgentHookEvent, ContentBlock, GenerateOptions, Msg, Role,
     ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState,
     memory::Memory,
     model::{ChatModel, ChatRequest, FinishReason},
-    tool::{ToolContext, ToolExecutor},
+    tool::{ToolContext, ToolExecutionMode, ToolExecutor},
 };
 
 use super::{
     AGENT_STATE_VERSION, Agent, AgentError, AgentFuture, AgentInterruptHandle, AgentResult,
-    AgentState, PendingToolCalls, StateKey, StateStore, ToolConfirmation, ToolConfirmationDecision,
+    AgentState, PendingToolCalls, PendingToolExecution, StateKey, StateStore, ToolConfirmation,
+    ToolConfirmationDecision,
 };
 
 const DEFAULT_MAX_STEPS: usize = 8;
@@ -43,6 +45,7 @@ pub struct ReActAgent {
     state_binding: Option<Arc<StateBinding>>,
     confirmation_tools: BTreeSet<String>,
     pending_tool_calls: Arc<Mutex<Option<PendingToolCalls>>>,
+    pending_tool_execution: Arc<Mutex<Option<PendingToolExecution>>>,
 }
 
 struct StateBinding {
@@ -97,6 +100,7 @@ impl ReActAgent {
             state_binding: None,
             confirmation_tools: BTreeSet::new(),
             pending_tool_calls: Arc::new(Mutex::new(None)),
+            pending_tool_execution: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -286,9 +290,27 @@ impl ReActAgent {
     ) -> AgentFuture<'_, Msg> {
         let reply_id = reply_id.into();
         Box::pin(async move {
+            let mut operation = self.begin_state_operation().await?;
+            let result = self
+                .resume_tool_calls_without_state_store(&reply_id, confirmations, &mut operation)
+                .await;
+            self.finish_state_operation(operation).await?;
+            result
+        })
+    }
+
+    /// Supplies terminal results after reconciling an uncertain external tool execution.
+    #[must_use]
+    pub fn resolve_tool_execution(
+        &self,
+        reply_id: impl Into<String>,
+        results: Vec<ToolResultBlock>,
+    ) -> AgentFuture<'_, Msg> {
+        let reply_id = reply_id.into();
+        Box::pin(async move {
             let operation = self.begin_state_operation().await?;
             let result = self
-                .resume_tool_calls_without_state_store(&reply_id, confirmations)
+                .resolve_tool_execution_without_state_store(&reply_id, results)
                 .await;
             self.finish_state_operation(operation).await?;
             result
@@ -298,6 +320,9 @@ impl ReActAgent {
     fn reply_without_state_store(&self, message: Msg) -> AgentFuture<'_, Msg> {
         Box::pin(async move {
             let interrupt = self.interrupt.token();
+            if let Some(checkpoint) = lock(&self.pending_tool_execution).clone() {
+                return Err(AgentError::ToolExecutionInDoubt { checkpoint });
+            }
             if let Some(pending) = lock(&self.pending_tool_calls).clone() {
                 return Err(AgentError::ToolConfirmationRequired {
                     checkpoint: pending,
@@ -420,7 +445,11 @@ impl ReActAgent {
         &self,
         reply_id: &str,
         confirmations: Vec<ToolConfirmation>,
+        operation: &mut Option<StateOperation>,
     ) -> AgentResult<Msg> {
+        if let Some(checkpoint) = lock(&self.pending_tool_execution).clone() {
+            return Err(AgentError::ToolExecutionInDoubt { checkpoint });
+        }
         let checkpoint = lock(&self.pending_tool_calls)
             .clone()
             .ok_or(AgentError::NoPendingToolConfirmation)?;
@@ -430,7 +459,7 @@ impl ReActAgent {
                 checkpoint.reply_id()
             )));
         }
-        let decisions = confirmation_map(&checkpoint, confirmations)?;
+        let decisions = confirmation_map(&checkpoint, confirmations.clone())?;
         let memory = self
             .memory
             .as_ref()
@@ -453,44 +482,33 @@ impl ReActAgent {
             .await?;
         let mut interrupt = self.interrupt.token();
         ensure_not_interrupted(&interrupt)?;
+        let execution = (!approved.is_empty()).then(|| {
+            PendingToolExecution::new(
+                Uuid::new_v4().simple().to_string(),
+                checkpoint.clone(),
+                confirmations,
+            )
+        });
+        if let Some(execution) = &execution {
+            *lock(&self.pending_tool_calls) = None;
+            *lock(&self.pending_tool_execution) = Some(execution.clone());
+            self.persist_state_operation(operation).await?;
+        }
         let (approved_results, interrupted) = tokio::select! {
             biased;
             () = interrupt.cancelled(), if !approved.is_empty() => {
-                (interrupted_tool_results(&approved)?, true)
+                (Vec::new(), true)
             }
-            results = self.tools.execute_all(&approved, ToolContext::new()) => {
+            results = self.execute_confirmed_tools(&approved, execution.as_ref()) => {
                 (results?, false)
             }
         };
-        let approved_results = approved_results
-            .into_iter()
-            .map(|result| (result.id().to_owned(), result))
-            .collect::<BTreeMap<_, _>>();
-        let mut results = Vec::with_capacity(checkpoint.calls().len());
-        for call in checkpoint.calls() {
-            match decisions.get(call.id()) {
-                Some(ToolConfirmationDecision::Approve) => {
-                    results.push(approved_results.get(call.id()).cloned().ok_or_else(|| {
-                        AgentError::InvalidModelResponse(format!(
-                            "approved tool `{}` produced no result",
-                            call.id()
-                        ))
-                    })?);
-                }
-                Some(ToolConfirmationDecision::Deny { reason }) => {
-                    results.push(
-                        ToolResultBlock::finished(
-                            call.id(),
-                            call.name(),
-                            reason.clone(),
-                            ToolResultState::Denied,
-                        )
-                        .map_err(|error| AgentError::InvalidModelResponse(error.to_string()))?,
-                    );
-                }
-                None => unreachable!("confirmation_map validates every pending call"),
-            }
+        if interrupted {
+            return Err(AgentError::ToolExecutionInDoubt {
+                checkpoint: execution.expect("non-empty approved calls create a checkpoint"),
+            });
         }
+        let results = reconciled_result_map(&checkpoint, &decisions, approved_results)?;
         finish_checkpoint_calls(&mut history, &checkpoint);
         memory.replace(history.clone()).await?;
         let observation = self
@@ -498,11 +516,79 @@ impl ReActAgent {
             .await?;
         history.push(observation);
         *lock(&self.pending_tool_calls) = None;
-        if interrupted {
-            return Err(AgentError::Interrupted);
-        }
+        *lock(&self.pending_tool_execution) = None;
         self.continue_reply(history, interrupt, checkpoint.step())
             .await
+    }
+
+    async fn resolve_tool_execution_without_state_store(
+        &self,
+        reply_id: &str,
+        results: Vec<ToolResultBlock>,
+    ) -> AgentResult<Msg> {
+        let execution = lock(&self.pending_tool_execution)
+            .clone()
+            .ok_or(AgentError::NoPendingToolExecution)?;
+        let checkpoint = execution.confirmation();
+        if checkpoint.reply_id() != reply_id {
+            return Err(AgentError::InvalidToolExecutionResolution(format!(
+                "reply id `{reply_id}` does not match pending reply `{}`",
+                checkpoint.reply_id()
+            )));
+        }
+        let decisions = confirmation_map(checkpoint, execution.decisions().to_vec())?;
+        let reconciled = reconciled_result_map(checkpoint, &decisions, results)?;
+        let memory = self
+            .memory
+            .as_ref()
+            .ok_or(AgentError::MemoryNotConfigured)?;
+        let mut history = memory.messages().await?;
+        validate_checkpoint_message(&history, checkpoint)?;
+        finish_checkpoint_calls(&mut history, checkpoint);
+        memory.replace(history.clone()).await?;
+        let observation = self
+            .record_tool_results(checkpoint.step(), &reconciled)
+            .await?;
+        history.push(observation);
+        *lock(&self.pending_tool_execution) = None;
+        let interrupt = self.interrupt.token();
+        self.continue_reply(history, interrupt, checkpoint.step())
+            .await
+    }
+
+    async fn execute_confirmed_tools(
+        &self,
+        calls: &[ToolCallBlock],
+        execution: Option<&PendingToolExecution>,
+    ) -> AgentResult<Vec<ToolResultBlock>> {
+        let contexts = calls
+            .iter()
+            .map(|call| {
+                let key = execution
+                    .and_then(|checkpoint| checkpoint.idempotency_key(call.id()))
+                    .expect("approved calls have durable idempotency keys");
+                ToolContext::new().with_idempotency_key(key)
+            })
+            .collect::<Vec<_>>();
+        match self.tools.mode() {
+            ToolExecutionMode::Sequential => {
+                let mut results = Vec::with_capacity(calls.len());
+                for (call, context) in calls.iter().zip(contexts) {
+                    results.push(self.tools.execute_one(call, context).await?);
+                }
+                Ok(results)
+            }
+            ToolExecutionMode::Concurrent => futures_util::future::join_all(
+                calls
+                    .iter()
+                    .zip(contexts)
+                    .map(|(call, context)| self.tools.execute_one(call, context)),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AgentError::Tool),
+        }
     }
 
     async fn observe_without_state_store(&self, message: Msg) -> AgentResult<()> {
@@ -534,9 +620,10 @@ impl ReActAgent {
         if let Some(record) = record {
             let state = record.into_state();
             self.validate_state(&state)?;
-            let (messages, pending) = state.into_parts();
+            let (messages, pending, execution) = state.into_parts();
             memory.replace(messages).await?;
             *lock(&self.pending_tool_calls) = pending;
+            *lock(&self.pending_tool_execution) = execution;
         }
         Ok(Some(StateOperation {
             binding,
@@ -562,13 +649,35 @@ impl ReActAgent {
         Ok(())
     }
 
+    async fn persist_state_operation(
+        &self,
+        operation: &mut Option<StateOperation>,
+    ) -> AgentResult<()> {
+        let Some(operation) = operation else {
+            return Ok(());
+        };
+        let state = self.snapshot_memory().await?;
+        let record = operation
+            .binding
+            .store
+            .save(
+                operation.binding.key.clone(),
+                operation.expected_revision,
+                state,
+            )
+            .await?;
+        operation.expected_revision = Some(record.revision());
+        Ok(())
+    }
+
     async fn snapshot_memory(&self) -> AgentResult<AgentState> {
         let memory = self
             .memory
             .as_ref()
             .ok_or(AgentError::MemoryNotConfigured)?;
         Ok(AgentState::new(self.name.clone(), memory.messages().await?)
-            .with_pending_tool_calls(lock(&self.pending_tool_calls).clone()))
+            .with_pending_tool_calls(lock(&self.pending_tool_calls).clone())
+            .with_pending_tool_execution(lock(&self.pending_tool_execution).clone()))
     }
 
     async fn restore_memory(&self, state: AgentState) -> AgentResult<()> {
@@ -577,9 +686,10 @@ impl ReActAgent {
             .memory
             .as_ref()
             .ok_or(AgentError::MemoryNotConfigured)?;
-        let (messages, pending) = state.into_parts();
+        let (messages, pending, execution) = state.into_parts();
         memory.replace(messages).await?;
         *lock(&self.pending_tool_calls) = pending;
+        *lock(&self.pending_tool_execution) = execution;
         Ok(())
     }
 
@@ -607,6 +717,25 @@ impl ReActAgent {
                 )));
             }
             validate_checkpoint_message(state.messages(), pending)?;
+        }
+        if state.pending_tool_calls().is_some() && state.pending_tool_execution().is_some() {
+            return Err(AgentError::InvalidToolConfirmation(
+                "state cannot wait for confirmation and execution simultaneously".to_owned(),
+            ));
+        }
+        if let Some(execution) = state.pending_tool_execution() {
+            execution
+                .validate()
+                .map_err(AgentError::InvalidToolExecutionResolution)?;
+            let pending = execution.confirmation();
+            if pending.step() >= self.max_steps {
+                return Err(AgentError::InvalidToolExecutionResolution(format!(
+                    "pending tool step {} leaves no model step to resume",
+                    pending.step()
+                )));
+            }
+            validate_checkpoint_message(state.messages(), pending)
+                .map_err(|error| AgentError::InvalidToolExecutionResolution(error.to_string()))?;
         }
         Ok(())
     }
@@ -738,6 +867,14 @@ impl Agent for ReActAgent {
         Self::resume_tool_calls(self, reply_id, confirmations)
     }
 
+    fn resolve_tool_execution(
+        &self,
+        reply_id: String,
+        results: Vec<ToolResultBlock>,
+    ) -> AgentFuture<'_, Msg> {
+        Self::resolve_tool_execution(self, reply_id, results)
+    }
+
     fn interrupt_handle(&self) -> AgentInterruptHandle {
         Self::interrupt_handle(self)
     }
@@ -761,6 +898,10 @@ impl fmt::Debug for ReActAgent {
             .field(
                 "pending_tool_calls",
                 &lock(&self.pending_tool_calls).as_ref(),
+            )
+            .field(
+                "pending_tool_execution",
+                &lock(&self.pending_tool_execution).as_ref(),
             )
             .finish()
     }
@@ -820,6 +961,86 @@ fn confirmation_map(
         )));
     }
     Ok(decisions)
+}
+
+fn reconciled_result_map(
+    checkpoint: &PendingToolCalls,
+    decisions: &BTreeMap<String, ToolConfirmationDecision>,
+    supplied: Vec<ToolResultBlock>,
+) -> AgentResult<Vec<ToolResultBlock>> {
+    let approved = checkpoint
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                decisions.get(call.id()),
+                Some(ToolConfirmationDecision::Approve)
+            )
+        })
+        .map(|call| (call.id(), call.name()))
+        .collect::<BTreeMap<_, _>>();
+    let mut supplied_by_id = BTreeMap::new();
+    for result in supplied {
+        let Some(expected_name) = approved.get(result.id()) else {
+            return Err(AgentError::InvalidToolExecutionResolution(format!(
+                "tool result `{}` is not an approved pending call",
+                result.id()
+            )));
+        };
+        if result.name() != *expected_name {
+            return Err(AgentError::InvalidToolExecutionResolution(format!(
+                "tool result `{}` has name `{}`, expected `{expected_name}`",
+                result.id(),
+                result.name()
+            )));
+        }
+        if !result.state().is_terminal() {
+            return Err(AgentError::InvalidToolExecutionResolution(format!(
+                "tool result `{}` is not terminal",
+                result.id()
+            )));
+        }
+        let result_id = result.id().to_owned();
+        if supplied_by_id.insert(result_id.clone(), result).is_some() {
+            return Err(AgentError::InvalidToolExecutionResolution(format!(
+                "tool result `{result_id}` was supplied more than once"
+            )));
+        }
+    }
+    let missing = approved
+        .keys()
+        .filter(|id| !supplied_by_id.contains_key(**id))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(AgentError::InvalidToolExecutionResolution(format!(
+            "missing results for approved tool calls: {}",
+            missing.join(", ")
+        )));
+    }
+
+    checkpoint
+        .calls()
+        .iter()
+        .map(|call| match decisions.get(call.id()) {
+            Some(ToolConfirmationDecision::Approve) => {
+                supplied_by_id.remove(call.id()).ok_or_else(|| {
+                    AgentError::InvalidToolExecutionResolution(format!(
+                        "missing result for approved tool call `{}`",
+                        call.id()
+                    ))
+                })
+            }
+            Some(ToolConfirmationDecision::Deny { reason }) => ToolResultBlock::finished(
+                call.id(),
+                call.name(),
+                reason.clone(),
+                ToolResultState::Denied,
+            )
+            .map_err(|error| AgentError::InvalidModelResponse(error.to_string())),
+            None => unreachable!("confirmation_map validates every pending call"),
+        })
+        .collect()
 }
 
 fn validate_checkpoint_message(history: &[Msg], checkpoint: &PendingToolCalls) -> AgentResult<()> {

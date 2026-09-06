@@ -127,9 +127,17 @@ Enable the persistent backend with `features = ["sqlite"]` in your dependency.
 Call `snapshot` or `restore` only while no reply is active on that agent.
 State-bound streams must be polled through their terminal event to perform their
 final save.
-Approved tools should still be idempotent: this first checkpoint implementation
-does not yet guarantee exactly-once external side effects if a process crashes
-during tool execution before the resolved state is saved.
+Before an approved tool runs, the agent now persists a `PendingToolExecution`
+checkpoint and supplies a stable key through `ToolContext::idempotency_key()`.
+If execution stops before its result is saved, a restored agent returns
+`AgentError::ToolExecutionInDoubt` instead of automatically running the tool
+again. After checking the external system, submit a terminal `ToolResultBlock`
+with `resolve_tool_execution` to continue the original reply.
+
+This prevents silent duplicate execution, but cannot guarantee exactly-once
+external side effects by itself. Side-effecting tools should honor the supplied
+idempotency key, and applications must reconcile uncertain outcomes before
+resuming.
 
 ## Roadmap / TODO
 
@@ -196,6 +204,8 @@ after they have been exercised by working examples.
 - [x] Add versioned manual agent state snapshot and atomic restoration
 - [x] Add a revisioned per-session `StateStore` and automatic restoration
 - [x] Add persisted tool-confirmation checkpoints and resume decisions
+- [x] Persist approved-tool execution checkpoints and stable idempotency keys
+- [x] Reconcile uncertain tool executions with externally supplied results
 - [ ] Add external tool execution and persisted permission rules
 - [ ] Add per-session resumable interruption
 - [ ] Add persistent `StateStore` plugins

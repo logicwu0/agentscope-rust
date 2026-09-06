@@ -67,6 +67,99 @@ impl PendingToolCalls {
     }
 }
 
+/// A durable record that approved tools may already have produced side effects.
+///
+/// The agent writes this checkpoint before invoking any approved tool. If the
+/// process stops before results are persisted, callers must reconcile the
+/// external operation and submit its terminal results explicitly.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingToolExecution {
+    execution_id: String,
+    confirmation: PendingToolCalls,
+    decisions: Vec<ToolConfirmation>,
+}
+
+impl PendingToolExecution {
+    pub(crate) fn new(
+        execution_id: String,
+        confirmation: PendingToolCalls,
+        decisions: Vec<ToolConfirmation>,
+    ) -> Self {
+        Self {
+            execution_id,
+            confirmation,
+            decisions,
+        }
+    }
+
+    /// Returns the stable identifier for this execution attempt.
+    #[must_use]
+    pub fn execution_id(&self) -> &str {
+        &self.execution_id
+    }
+
+    /// Returns the original confirmation checkpoint.
+    #[must_use]
+    pub const fn confirmation(&self) -> &PendingToolCalls {
+        &self.confirmation
+    }
+
+    /// Returns the decisions that authorized this execution.
+    #[must_use]
+    pub fn decisions(&self) -> &[ToolConfirmation] {
+        &self.decisions
+    }
+
+    /// Returns the stable idempotency key supplied to one approved tool.
+    #[must_use]
+    pub fn idempotency_key(&self, tool_call_id: &str) -> Option<String> {
+        self.decisions.iter().find_map(|confirmation| {
+            (confirmation.tool_call_id() == tool_call_id
+                && matches!(confirmation.decision(), ToolConfirmationDecision::Approve))
+            .then(|| format!("{}:{tool_call_id}", self.execution_id))
+        })
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.execution_id.trim().is_empty() {
+            return Err("pending tool execution id cannot be empty".to_owned());
+        }
+        self.confirmation.validate()?;
+        let expected = self
+            .confirmation
+            .calls()
+            .iter()
+            .map(ToolCallBlock::id)
+            .collect::<BTreeSet<_>>();
+        let mut found = BTreeSet::new();
+        let mut approved = 0;
+        for decision in &self.decisions {
+            if !expected.contains(decision.tool_call_id()) {
+                return Err(format!(
+                    "tool call `{}` is not part of the execution checkpoint",
+                    decision.tool_call_id()
+                ));
+            }
+            if !found.insert(decision.tool_call_id()) {
+                return Err(format!(
+                    "tool call `{}` has more than one execution decision",
+                    decision.tool_call_id()
+                ));
+            }
+            if matches!(decision.decision(), ToolConfirmationDecision::Approve) {
+                approved += 1;
+            }
+        }
+        if found.len() != expected.len() {
+            return Err("execution checkpoint is missing tool decisions".to_owned());
+        }
+        if approved == 0 {
+            return Err("execution checkpoint has no approved tool calls".to_owned());
+        }
+        Ok(())
+    }
+}
+
 /// The user's decision for one pending tool call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "decision")]

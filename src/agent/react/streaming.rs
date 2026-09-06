@@ -80,6 +80,9 @@ impl ReActAgent {
     fn stream_without_state_store(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
         Box::pin(async move {
             let interrupt = self.interrupt.token();
+            if let Some(checkpoint) = super::lock(&self.pending_tool_execution).clone() {
+                return Err(AgentError::ToolExecutionInDoubt { checkpoint });
+            }
             if let Some(pending) = super::lock(&self.pending_tool_calls).clone() {
                 return Err(AgentError::ToolConfirmationRequired {
                     checkpoint: pending,

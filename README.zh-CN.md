@@ -109,8 +109,14 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 在依赖配置中加入 `features = ["sqlite"]` 即可启用持久化后端。
 请仅在目标 Agent 没有正在执行的回复时调用 `snapshot` 或 `restore`。
 绑定状态存储的流必须读取到终止事件，才能执行最终保存。
-获批工具仍应设计成幂等操作：当前首版检查点尚不能保证进程在工具执行中、状态保存前
-崩溃时，外部副作用严格只发生一次。
+获批工具执行前，Agent 现在会先持久化 `PendingToolExecution` 检查点，并通过
+`ToolContext::idempotency_key()` 提供稳定幂等键。如果执行结果尚未保存进程就停止，
+恢复后的 Agent 会返回 `AgentError::ToolExecutionInDoubt`，不会自动再次调用工具。
+应用检查外部系统后，可通过 `resolve_tool_execution` 提交终态 `ToolResultBlock`，继续
+原来的回复。
+
+这能避免静默重复执行，但框架本身仍无法保证外部副作用严格 exactly-once。具有副作用
+的工具应正确处理幂等键，应用也必须先核对结果不确定的执行，再恢复会话。
 
 ## 路线图 / TODO
 
@@ -176,6 +182,8 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 - [x] 支持版本化的手动 Agent 状态快照与原子恢复
 - [x] 支持带 revision 的会话级 `StateStore` 与自动恢复
 - [x] 支持持久化的工具确认检查点与恢复决定
+- [x] 持久化获批工具的执行检查点并提供稳定幂等键
+- [x] 使用外部确认的结果恢复执行结果不确定的工具调用
 - [ ] 支持外部工具执行与持久化权限规则
 - [ ] 支持会话级可恢复中断
 - [ ] 添加持久化 `StateStore` 插件

@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::Msg;
 
-use super::PendingToolCalls;
+use super::{PendingToolCalls, PendingToolExecution};
 
 /// The state format version emitted by this crate.
-pub const AGENT_STATE_VERSION: u32 = 2;
+pub const AGENT_STATE_VERSION: u32 = 3;
 
 /// A complete, restartable snapshot of one agent's conversation state.
 ///
@@ -21,6 +21,8 @@ pub struct AgentState {
     messages: Vec<Msg>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_tool_calls: Option<PendingToolCalls>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_tool_execution: Option<PendingToolExecution>,
 }
 
 impl AgentState {
@@ -32,6 +34,7 @@ impl AgentState {
             agent_name: agent_name.into(),
             messages,
             pending_tool_calls: None,
+            pending_tool_execution: None,
         }
     }
 
@@ -64,8 +67,32 @@ impl AgentState {
         self
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<Msg>, Option<PendingToolCalls>) {
-        (self.messages, self.pending_tool_calls)
+    /// Returns an execution whose external outcome may be uncertain.
+    #[must_use]
+    pub const fn pending_tool_execution(&self) -> Option<&PendingToolExecution> {
+        self.pending_tool_execution.as_ref()
+    }
+
+    pub(crate) fn with_pending_tool_execution(
+        mut self,
+        pending: Option<PendingToolExecution>,
+    ) -> Self {
+        self.pending_tool_execution = pending;
+        self
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Vec<Msg>,
+        Option<PendingToolCalls>,
+        Option<PendingToolExecution>,
+    ) {
+        (
+            self.messages,
+            self.pending_tool_calls,
+            self.pending_tool_execution,
+        )
     }
 }
 

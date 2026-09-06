@@ -497,9 +497,101 @@ fn state_store_restores_a_pending_tool_call_in_a_new_agent() {
 
     assert_eq!(reply.text_content(""), Some("finished".to_owned()));
     assert_eq!(resumed_tool.recorded_invocations().len(), 1);
+    let invocations = resumed_tool.recorded_invocations();
+    let idempotency_key = invocations[0].context.idempotency_key().unwrap();
+    assert!(idempotency_key.ends_with(":call-confirm-4"));
     let saved = block_on(store.load(&key)).unwrap().unwrap();
-    assert_eq!(saved.revision(), 2);
+    assert_eq!(saved.revision(), 3);
     assert!(saved.state().pending_tool_calls().is_none());
+    assert!(saved.state().pending_tool_execution().is_none());
+}
+
+#[test]
+fn uncertain_confirmed_tool_execution_requires_external_reconciliation() {
+    let key = StateKey::new("user-1", "uncertain-tool").unwrap();
+    let store = Arc::new(InMemoryStateStore::new());
+    let handle_slot = Arc::new(Mutex::new(None));
+    let tool = Arc::new(InterruptingTool {
+        definition: calculator_definition(),
+        handle: handle_slot.clone(),
+        invocations: AtomicUsize::new(0),
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register_shared(tool.clone()).unwrap();
+    let call = ToolCallBlock::complete("call-uncertain-1", "calculator", r#"{"expression":"6*7"}"#)
+        .unwrap();
+    let first_store: Arc<dyn StateStore> = store.clone();
+    let first = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("first-model").with_response(ChatResponse::finished(
+            [ContentBlock::from(call)],
+            FinishReason::ToolCalls,
+        )),
+        ToolExecutor::new(registry),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), first_store)
+    .with_tool_confirmation_required("calculator");
+    *handle_slot.lock().unwrap() = Some(first.interrupt_handle());
+
+    let paused = block_on(first.reply(Msg::user("Run it"))).unwrap_err();
+    let AgentError::ToolConfirmationRequired { checkpoint } = paused else {
+        panic!("tool call should pause for confirmation")
+    };
+    let uncertain = block_on(first.resume_tool_calls(
+        checkpoint.reply_id(),
+        vec![ToolConfirmation::approve("call-uncertain-1")],
+    ))
+    .unwrap_err();
+    let AgentError::ToolExecutionInDoubt {
+        checkpoint: execution,
+    } = uncertain
+    else {
+        panic!("interrupted approved tool should remain uncertain")
+    };
+    assert_eq!(tool.invocations.load(Ordering::SeqCst), 1);
+    assert!(
+        execution
+            .idempotency_key("call-uncertain-1")
+            .unwrap()
+            .ends_with(":call-uncertain-1")
+    );
+    let saved = block_on(store.load(&key)).unwrap().unwrap();
+    assert_eq!(saved.state().pending_tool_execution(), Some(&execution));
+
+    let recovered_tool =
+        Arc::new(MockTool::new(calculator_definition()).with_output("must not run"));
+    let mut recovered_registry = ToolRegistry::new();
+    recovered_registry
+        .register_shared(recovered_tool.clone())
+        .unwrap();
+    let recovered_store: Arc<dyn StateStore> = store.clone();
+    let recovered = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("recovered-model").with_response(ChatResponse::completed([
+            ContentBlock::from("The answer is 42."),
+        ])),
+        ToolExecutor::new(recovered_registry),
+    )
+    .unwrap()
+    .with_memory(InMemoryMemory::new())
+    .with_shared_state_store(key.clone(), recovered_store)
+    .with_tool_confirmation_required("calculator");
+
+    assert!(matches!(
+        block_on(recovered.reply(Msg::user("continue"))).unwrap_err(),
+        AgentError::ToolExecutionInDoubt { .. }
+    ));
+    assert!(recovered_tool.recorded_invocations().is_empty());
+    let result = crate::ToolResultBlock::success("call-uncertain-1", "calculator", "42").unwrap();
+    let reply =
+        block_on(recovered.resolve_tool_execution(checkpoint.reply_id(), vec![result])).unwrap();
+
+    assert_eq!(reply.text_content(""), Some("The answer is 42.".to_owned()));
+    assert!(recovered_tool.recorded_invocations().is_empty());
+    let saved = block_on(store.load(&key)).unwrap().unwrap();
+    assert!(saved.state().pending_tool_execution().is_none());
 }
 
 #[test]
@@ -768,6 +860,30 @@ fn react_agent_restores_legacy_version_one_state() {
     let message = Msg::user("legacy history");
     let legacy: AgentState = serde_json::from_value(json!({
         "format_version": 1,
+        "agent_name": "Friday",
+        "messages": [message.clone()],
+    }))
+    .unwrap();
+    let memory = Arc::new(InMemoryMemory::new());
+    let shared_memory: Arc<dyn Memory> = memory.clone();
+    let agent = ReActAgent::new(
+        "Friday",
+        MockChatModel::new("mock-model"),
+        ToolExecutor::new(ToolRegistry::new()),
+    )
+    .unwrap()
+    .with_shared_memory(shared_memory);
+
+    block_on(agent.restore(legacy)).unwrap();
+
+    assert_eq!(block_on(memory.messages()).unwrap(), [message]);
+}
+
+#[test]
+fn react_agent_restores_legacy_version_two_state() {
+    let message = Msg::user("version two history");
+    let legacy: AgentState = serde_json::from_value(json!({
+        "format_version": 2,
         "agent_name": "Friday",
         "messages": [message.clone()],
     }))

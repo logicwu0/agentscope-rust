@@ -16,6 +16,9 @@ pub type ToolResult<T> = Result<T, ToolError>;
 /// A boxed asynchronous tool operation.
 pub type ToolFuture<'a, T> = Pin<Box<dyn Future<Output = ToolResult<T>> + Send + 'a>>;
 
+/// Metadata key carrying a stable identifier for deduplicating a tool call.
+pub const TOOL_IDEMPOTENCY_KEY: &str = "agentscope.idempotency_key";
+
 /// Application data made available to one tool invocation.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ToolContext {
@@ -36,6 +39,22 @@ impl ToolContext {
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;
         self
+    }
+
+    /// Adds a stable idempotency key for a side-effecting invocation.
+    #[must_use]
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.metadata
+            .insert(TOOL_IDEMPOTENCY_KEY.to_owned(), Value::String(key.into()));
+        self
+    }
+
+    /// Returns the idempotency key supplied by the agent, when present.
+    #[must_use]
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.metadata
+            .get(TOOL_IDEMPOTENCY_KEY)
+            .and_then(Value::as_str)
     }
 }
 

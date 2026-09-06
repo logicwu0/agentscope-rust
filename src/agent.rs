@@ -20,7 +20,9 @@ use crate::{
     tool::ToolError,
 };
 
-pub use confirmation::{PendingToolCalls, ToolConfirmation, ToolConfirmationDecision};
+pub use confirmation::{
+    PendingToolCalls, PendingToolExecution, ToolConfirmation, ToolConfirmationDecision,
+};
 pub use event::AgentEvent;
 pub use hook::{AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture, AgentHookResult};
 pub use interrupt::AgentInterruptHandle;
@@ -67,6 +69,13 @@ pub trait Agent: Send + Sync {
         confirmations: Vec<ToolConfirmation>,
     ) -> AgentFuture<'_, Msg>;
 
+    /// Resolves an execution with externally reconciled terminal tool results.
+    fn resolve_tool_execution(
+        &self,
+        reply_id: String,
+        results: Vec<crate::ToolResultBlock>,
+    ) -> AgentFuture<'_, Msg>;
+
     /// Returns a handle that can interrupt in-flight replies on this agent.
     fn interrupt_handle(&self) -> AgentInterruptHandle;
 }
@@ -96,13 +105,22 @@ pub enum AgentError {
     NoPendingToolConfirmation,
     /// Confirmation input did not match the persisted checkpoint.
     InvalidToolConfirmation(String),
+    /// Approved tools may have run, but their results were not durably saved.
+    ToolExecutionInDoubt {
+        /// The persisted checkpoint used to reconcile the external effects.
+        checkpoint: PendingToolExecution,
+    },
+    /// No uncertain tool-execution checkpoint exists for this session.
+    NoPendingToolExecution,
+    /// Reconciled results did not match the persisted execution checkpoint.
+    InvalidToolExecutionResolution(String),
     /// Per-session agent state could not be loaded or saved.
     StateStore(StateStoreError),
     /// The state snapshot uses a format this crate cannot restore.
     UnsupportedStateVersion {
         /// The version found in the snapshot.
         found: u32,
-        /// The only version supported by this crate.
+        /// The newest version supported by this crate.
         supported: u32,
     },
     /// The state snapshot belongs to a differently named agent.
@@ -147,10 +165,21 @@ impl fmt::Display for AgentError {
             Self::InvalidToolConfirmation(message) => {
                 write!(formatter, "invalid tool confirmation: {message}")
             }
+            Self::ToolExecutionInDoubt { checkpoint } => write!(
+                formatter,
+                "tool execution {} may have completed; reconcile it before continuing",
+                checkpoint.execution_id()
+            ),
+            Self::NoPendingToolExecution => {
+                formatter.write_str("agent has no uncertain tool execution")
+            }
+            Self::InvalidToolExecutionResolution(message) => {
+                write!(formatter, "invalid tool execution resolution: {message}")
+            }
             Self::StateStore(error) => write!(formatter, "agent state persistence failed: {error}"),
             Self::UnsupportedStateVersion { found, supported } => write!(
                 formatter,
-                "unsupported agent state version {found}; expected {supported}"
+                "unsupported agent state version {found}; this crate supports up to {supported}"
             ),
             Self::StateAgentMismatch { expected, found } => write!(
                 formatter,
@@ -185,6 +214,9 @@ impl std::error::Error for AgentError {
             | Self::ToolConfirmationRequired { .. }
             | Self::NoPendingToolConfirmation
             | Self::InvalidToolConfirmation(_)
+            | Self::ToolExecutionInDoubt { .. }
+            | Self::NoPendingToolExecution
+            | Self::InvalidToolExecutionResolution(_)
             | Self::UnsupportedStateVersion { .. }
             | Self::StateAgentMismatch { .. }
             | Self::Interrupted
