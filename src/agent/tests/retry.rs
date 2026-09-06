@@ -93,7 +93,9 @@ fn interrupted_retry_preserves_the_original_checkpoint() {
         invocations: AtomicUsize::new(0),
     });
     let mut registry = ToolRegistry::new();
-    registry.register_shared(tool.clone()).unwrap();
+    registry
+        .register(crate::IdempotentTool::from_shared(tool.clone()))
+        .unwrap();
     let agent = ReActAgent::new(
         "Friday",
         MockChatModel::new("mock"),
@@ -103,6 +105,20 @@ fn interrupted_retry_preserves_the_original_checkpoint() {
     .with_memory(InMemoryMemory::new());
     *handle.lock().unwrap() = Some(agent.interrupt_handle());
     block_on(agent.restore(state)).unwrap();
+    let error =
+        block_on(agent.retry_tool_execution(execution.confirmation().reply_id())).unwrap_err();
+    assert_eq!(
+        error,
+        AgentError::ToolExecutionInDoubt {
+            checkpoint: execution.clone()
+        }
+    );
+    assert_eq!(
+        block_on(agent.snapshot()).unwrap().pending_tool_execution(),
+        Some(&execution)
+    );
+    assert_eq!(tool.invocations.load(Ordering::SeqCst), 1);
+    // The wrapper remembers cancellation and refuses a second external effect.
     let error =
         block_on(agent.retry_tool_execution(execution.confirmation().reply_id())).unwrap_err();
     assert_eq!(

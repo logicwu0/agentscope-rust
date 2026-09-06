@@ -146,6 +146,21 @@ external side effects by itself. Side-effecting tools should honor the supplied
 idempotency key, and applications must reconcile uncertain outcomes before
 resuming.
 
+Wrap a side-effecting tool before registering it to enable process-local
+deduplication: `registry.register(IdempotentTool::new(my_tool))?`.
+Clones of the wrapper share cached results. Identical keys, JSON inputs, and all
+context metadata reuse the original result, including errors; conflicting input
+or context is rejected. Concurrent duplicates wait for one execution. Calls
+without a key run normally; blank/non-string keys are rejected. Cancellation or
+panic leaves an uncertain record and blocks another execution until the external
+outcome is reconciled via the agent's `resolve_tool_execution` API.
+
+The default capacity is 1024 keys, configurable with `IdempotentTool::with_capacity`.
+Records are never evicted; new keyed calls fail when full. These records live only
+in that wrapper's memory and are lost on restart. Durable deduplication still
+requires a storage plugin or idempotency support in the external service.
+Run the offline example with `cargo run --example idempotent_tool`.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -189,6 +204,8 @@ after they have been exercised by working examples.
 
 - [x] Define an object-safe asynchronous tool interface
 - [x] Execute tool-call batches sequentially or concurrently
+- [x] Add bounded process-local idempotent tool deduplication
+- [ ] Add durable idempotency records and external-outcome reconciliation
 - [ ] Add streaming tool execution
 - [x] Implement a tool registry and JSON Schema input validation
 - [ ] Generate JSON Schema from Rust types

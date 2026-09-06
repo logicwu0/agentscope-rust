@@ -36,8 +36,8 @@ pub use message::{
 
 pub use tool::TOOL_IDEMPOTENCY_KEY;
 pub use tool::{
-    MockTool, Tool, ToolContext, ToolError, ToolExecutionMode, ToolExecutor, ToolFuture,
-    ToolInvocation, ToolRegistry, ToolResult,
+    IdempotentTool, MockTool, Tool, ToolContext, ToolError, ToolExecutionMode, ToolExecutor,
+    ToolFuture, ToolInvocation, ToolRegistry, ToolResult,
 };
 
 /// The current crate version.

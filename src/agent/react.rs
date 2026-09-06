@@ -633,7 +633,7 @@ impl ReActAgent {
                 ToolContext::new().with_idempotency_key(key)
             })
             .collect::<Vec<_>>();
-        match self.tools.mode() {
+        let results = match self.tools.mode() {
             ToolExecutionMode::Sequential => {
                 let mut results = Vec::with_capacity(calls.len());
                 for (call, context) in calls.iter().zip(contexts) {
@@ -651,7 +651,22 @@ impl ReActAgent {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(AgentError::Tool),
+        }?;
+        if results.iter().any(|result| {
+            result
+                .metadata
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(serde_json::Value::as_str)
+                == Some("idempotency_in_doubt")
+        }) {
+            if let Some(checkpoint) = execution {
+                return Err(AgentError::ToolExecutionInDoubt {
+                    checkpoint: checkpoint.clone(),
+                });
+            }
         }
+        Ok(results)
     }
 
     async fn observe_without_state_store(&self, message: Msg) -> AgentResult<()> {
