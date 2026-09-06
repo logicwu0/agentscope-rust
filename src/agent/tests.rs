@@ -13,6 +13,8 @@ use futures_util::StreamExt;
 use serde_json::json;
 use tokio::sync::Barrier;
 
+mod retry;
+
 use crate::{
     AGENT_STATE_VERSION, Agent, AgentError, AgentEvent, AgentHook, AgentHookError, AgentHookEvent,
     AgentHookFuture, AgentInterruptHandle, AgentState, ChatEvent, ChatEventStream, ChatModel,

@@ -76,6 +76,10 @@ pub trait Agent: Send + Sync {
         results: Vec<crate::ToolResultBlock>,
     ) -> AgentFuture<'_, Msg>;
 
+    /// Explicitly retries all approved calls of an uncertain execution with
+    /// their original idempotency keys. Tools must honor those keys to deduplicate effects.
+    fn retry_tool_execution(&self, reply_id: String) -> AgentFuture<'_, Msg>;
+
     /// Returns a handle that can interrupt in-flight replies on this agent.
     fn interrupt_handle(&self) -> AgentInterruptHandle;
 }

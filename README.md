@@ -134,6 +134,13 @@ If execution stops before its result is saved, a restored agent returns
 again. After checking the external system, submit a terminal `ToolResultBlock`
 with `resolve_tool_execution` to continue the original reply.
 
+If the application explicitly authorizes another attempt, call
+`agent.retry_tool_execution(checkpoint.confirmation().reply_id()).await?`.
+This retries all originally approved calls using their original idempotency
+keys, including calls that may already have succeeded; denied calls stay denied.
+An interrupted retry keeps the same uncertain checkpoint. The method is also
+available through `dyn Agent`. No automatic retry is performed.
+
 This prevents silent duplicate execution, but cannot guarantee exactly-once
 external side effects by itself. Side-effecting tools should honor the supplied
 idempotency key, and applications must reconcile uncertain outcomes before
@@ -206,6 +213,7 @@ after they have been exercised by working examples.
 - [x] Add persisted tool-confirmation checkpoints and resume decisions
 - [x] Persist approved-tool execution checkpoints and stable idempotency keys
 - [x] Reconcile uncertain tool executions with externally supplied results
+- [x] Explicitly retry uncertain executions using the original idempotency keys
 - [ ] Add external tool execution and persisted permission rules
 - [ ] Add per-session resumable interruption
 - [ ] Add persistent `StateStore` plugins

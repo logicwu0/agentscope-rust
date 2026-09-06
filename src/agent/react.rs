@@ -317,6 +317,69 @@ impl ReActAgent {
         })
     }
 
+    /// Explicitly retries every approved call in an uncertain execution.
+    ///
+    /// Calling this method authorizes another invocation, including calls that
+    /// may already have succeeded. The original idempotency keys are reused;
+    /// tools must honor them to prevent duplicate external effects. Denied calls
+    /// are never executed. A bound store is updated before invoking any tool.
+    #[must_use]
+    pub fn retry_tool_execution(&self, reply_id: impl Into<String>) -> AgentFuture<'_, Msg> {
+        let reply_id = reply_id.into();
+        Box::pin(async move {
+            let mut operation = self.begin_state_operation().await?;
+            let result = self
+                .retry_pending_execution(&reply_id, &mut operation)
+                .await;
+            self.finish_state_operation(operation).await?;
+            result
+        })
+    }
+
+    async fn retry_pending_execution(
+        &self,
+        reply_id: &str,
+        operation: &mut Option<StateOperation>,
+    ) -> AgentResult<Msg> {
+        let execution = lock(&self.pending_tool_execution)
+            .clone()
+            .ok_or(AgentError::NoPendingToolExecution)?;
+        let checkpoint = execution.confirmation();
+        if checkpoint.reply_id() != reply_id {
+            return Err(AgentError::InvalidToolExecutionResolution(format!(
+                "reply id `{reply_id}` does not match pending reply `{}`",
+                checkpoint.reply_id()
+            )));
+        }
+        let memory = self
+            .memory
+            .as_ref()
+            .ok_or(AgentError::MemoryNotConfigured)?;
+        validate_checkpoint_message(&memory.messages().await?, checkpoint)?;
+        let approved = checkpoint
+            .calls()
+            .iter()
+            .filter(|call| execution.idempotency_key(call.id()).is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut interrupt = self.interrupt.token();
+        self.notify_before_tool_calls(checkpoint.step(), &approved)
+            .await?;
+        ensure_not_interrupted(&interrupt)?;
+        // CAS claims this revision before external effects, including when
+        // independent agent instances attempt to retry the same checkpoint.
+        self.persist_state_operation(operation).await?;
+        let results = tokio::select! {
+            biased;
+            () = interrupt.cancelled() => {
+                return Err(AgentError::ToolExecutionInDoubt { checkpoint: execution });
+            }
+            results = self.execute_confirmed_tools(&approved, Some(&execution)) => results?,
+        };
+        self.resolve_tool_execution_without_state_store(reply_id, results)
+            .await
+    }
+
     fn reply_without_state_store(&self, message: Msg) -> AgentFuture<'_, Msg> {
         Box::pin(async move {
             let interrupt = self.interrupt.token();
@@ -873,6 +936,10 @@ impl Agent for ReActAgent {
         results: Vec<ToolResultBlock>,
     ) -> AgentFuture<'_, Msg> {
         Self::resolve_tool_execution(self, reply_id, results)
+    }
+
+    fn retry_tool_execution(&self, reply_id: String) -> AgentFuture<'_, Msg> {
+        Self::retry_tool_execution(self, reply_id)
     }
 
     fn interrupt_handle(&self) -> AgentInterruptHandle {
