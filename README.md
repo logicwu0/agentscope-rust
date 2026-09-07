@@ -161,6 +161,27 @@ in that wrapper's memory and are lost on restart. Durable deduplication still
 requires a storage plugin or idempotency support in the external service.
 Run the offline example with `cargo run --example idempotent_tool`.
 
+### SQLite agent state plugin
+
+`plugins/agentscope-state-sqlite` provides `SQLiteStateStore` independently of
+the core crate's `sqlite` memory feature. Bind it with
+`agent.with_state_store(key, SQLiteStateStore::open(path).await?)` and configure
+`InMemoryMemory` as the agent's working memory. Complete snapshots, including
+confirmation and uncertain-execution checkpoints, survive process restarts.
+Writes check revisions in an immediate SQLite transaction. Schema version 1 uses
+plugin-specific tables; unsupported versions fail without migration.
+
+Run these commands separately to demonstrate an actual process restart (use a
+fresh database path). The demo's `resume` command explicitly approves the tools:
+
+```shell
+cargo run -p agentscope-state-sqlite --example restart -- pause /tmp/agentscope-demo.db
+cargo run -p agentscope-state-sqlite --example restart -- resume /tmp/agentscope-demo.db
+```
+
+The plugin persists agent state, not `IdempotentTool`'s result cache. Durable
+idempotency records remain a separate TODO.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -233,7 +254,7 @@ after they have been exercised by working examples.
 - [x] Explicitly retry uncertain executions using the original idempotency keys
 - [ ] Add external tool execution and persisted permission rules
 - [ ] Add per-session resumable interruption
-- [ ] Add persistent `StateStore` plugins
+- [x] Add the independent SQLite `StateStore` plugin
 - [ ] Provide single-agent and multi-agent examples
 
 ### Storage Plugins
@@ -274,8 +295,8 @@ The project currently targets Rust 1.85 or newer and the Rust 2024 edition.
 
 ```shell
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 ```
 
 ## Contributing

@@ -134,6 +134,25 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 容量满后拒绝新键。这些记录只保存在该包装器的内存中，重启后丢失；跨进程去重仍需
 持久化插件或外部服务支持。离线示例：`cargo run --example idempotent_tool`。
 
+### SQLite Agent 状态插件
+
+`plugins/agentscope-state-sqlite` 提供独立的 `SQLiteStateStore`，无需启用核心库的
+`sqlite` 会话记忆功能。通过
+`agent.with_state_store(key, SQLiteStateStore::open(path).await?)` 绑定，并配置
+`InMemoryMemory` 作为运行时记忆。完整快照（含人工确认、结果不确定的执行检查点）
+可跨进程重启恢复。写入在 SQLite 即时事务中检查 revision。数据库 schema v1 使用
+插件专属表；遇到未知版本会拒绝打开，不会自动迁移。
+
+分别运行以下命令验证真实进程退出再恢复（使用新的数据库路径）。示例的 `resume`
+命令代表调用方明确批准执行：
+
+```shell
+cargo run -p agentscope-state-sqlite --example restart -- pause /tmp/agentscope-demo.db
+cargo run -p agentscope-state-sqlite --example restart -- resume /tmp/agentscope-demo.db
+```
+
+本插件保存 Agent 状态，不保存 `IdempotentTool` 的结果缓存。幂等记录持久化仍是后续 TODO。
+
 ## 路线图 / TODO
 
 项目将采用渐进式开发。只有经过可运行示例验证的接口，才会逐步进入稳定状态。
@@ -205,7 +224,7 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 - [x] 使用原幂等键显式重试结果不确定的工具执行
 - [ ] 支持外部工具执行与持久化权限规则
 - [ ] 支持会话级可恢复中断
-- [ ] 添加持久化 `StateStore` 插件
+- [x] 添加独立的 SQLite `StateStore` 插件
 - [ ] 提供单 Agent 与多 Agent 示例
 
 ### 存储插件
@@ -245,8 +264,8 @@ let reply = agent.reply(Msg::user("6 乘以 7 等于多少？")).await?;
 
 ```shell
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 ```
 
 ## 参与贡献

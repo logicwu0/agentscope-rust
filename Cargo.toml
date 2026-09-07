@@ -14,6 +14,10 @@ publish = false
 default = []
 sqlite = ["dep:tokio-rusqlite"]
 
+[workspace]
+members = ["plugins/agentscope-state-sqlite"]
+resolver = "3"
+
 [lib]
 name = "agentscope"
 path = "src/lib.rs"

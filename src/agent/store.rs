@@ -107,6 +107,20 @@ impl<'de> Deserialize<'de> for StateRecord {
 }
 
 impl StateRecord {
+    /// Constructs a record returned by a state storage plugin.
+    ///
+    /// # Errors
+    /// Returns an error if the revision is zero.
+    pub fn new(revision: u64, state: AgentState) -> StateStoreResult<Self> {
+        if revision == 0 {
+            return Err(
+                StateStoreError::new("state revision must be greater than zero")
+                    .with_code("invalid_revision"),
+            );
+        }
+        Ok(Self { revision, state })
+    }
+
     /// Returns the monotonically increasing store revision.
     #[must_use]
     pub const fn revision(&self) -> u64 {
@@ -235,7 +249,9 @@ impl StateStoreError {
         self
     }
 
-    fn conflict(expected: Option<u64>, actual: Option<u64>) -> Self {
+    /// Creates the standard optimistic-concurrency conflict error for plugins.
+    #[must_use]
+    pub fn conflict(expected: Option<u64>, actual: Option<u64>) -> Self {
         Self::new(format!(
             "state revision conflict: expected {expected:?}, found {actual:?}"
         ))
