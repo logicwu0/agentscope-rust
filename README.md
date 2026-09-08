@@ -179,8 +179,48 @@ cargo run -p agentscope-state-sqlite --example restart -- pause /tmp/agentscope-
 cargo run -p agentscope-state-sqlite --example restart -- resume /tmp/agentscope-demo.db
 ```
 
-The plugin persists agent state, not `IdempotentTool`'s result cache. Durable
-idempotency records remain a separate TODO.
+The plugin persists agent state, not `IdempotentTool`'s result cache. For durable
+tool deduplication, use the separate plugin below.
+
+### SQLite idempotency plugin
+
+`agentscope-idempotency-sqlite` implements the core `IdempotencyStore` contract.
+Register `PersistentIdempotentTool` with a stable tenant/tool-version namespace:
+
+```rust
+let store = SQLiteIdempotencyStore::open("agent.db").await?;
+registry.register(PersistentIdempotentTool::new("tenant-a:notes:v1", my_tool, store)?)?;
+```
+
+An atomic claim is saved before tool execution. Completed successes and errors
+are reused across restarts for the same namespace, tool name, key, JSON input,
+and complete context. Conflicting input/context is rejected. Unlike the in-memory
+wrapper, concurrent duplicates of an unfinished invocation return
+`idempotency_in_doubt` immediately; they do not wait or take over execution.
+Cancelled executions, panics, and failed completion writes retain uncertain
+records. The agent preserves its execution checkpoint for these outcomes.
+
+After stopping/fencing the original worker and verifying the external outcome,
+call `store.reconcile(request, verified_result).await?` with the original
+`IdempotencyRequest`. Then `agent.retry_tool_execution(reply_id)` retrieves the
+stored result and continues the conversation without invoking that tool again.
+Completed results cannot be overwritten. `resolve_tool_execution` alone resolves
+agent state; it does not update the separate idempotency store.
+
+Records never expire or auto-retry. The database stores full inputs, context
+metadata, and outputs; protect it as application data. External effects are not
+transactional with SQLite, so an interrupted invocation still requires outcome
+reconciliation. Retention policies are a future extension.
+
+Run these commands as separate processes, using a fresh database for `first`:
+
+```shell
+cargo run -p agentscope-idempotency-sqlite --example idempotency_restart -- first /tmp/agentscope-idempotency.db
+cargo run -p agentscope-idempotency-sqlite --example idempotency_restart -- replay /tmp/agentscope-idempotency.db
+```
+
+The first process executes once; the replay process executes zero tools and
+returns the same result. Both SQLite plugins can share the same database file.
 
 ## Roadmap / TODO
 
@@ -226,7 +266,8 @@ after they have been exercised by working examples.
 - [x] Define an object-safe asynchronous tool interface
 - [x] Execute tool-call batches sequentially or concurrently
 - [x] Add bounded process-local idempotent tool deduplication
-- [ ] Add durable idempotency records and external-outcome reconciliation
+- [x] Add durable idempotency records and external-outcome reconciliation
+- [ ] Add idempotency record inspection and retention policies
 - [ ] Add streaming tool execution
 - [x] Implement a tool registry and JSON Schema input validation
 - [ ] Generate JSON Schema from Rust types

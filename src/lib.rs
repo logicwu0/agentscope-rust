@@ -36,7 +36,8 @@ pub use message::{
 
 pub use tool::TOOL_IDEMPOTENCY_KEY;
 pub use tool::{
-    IdempotentTool, MockTool, Tool, ToolContext, ToolError, ToolExecutionMode, ToolExecutor,
+    IdempotencyClaim, IdempotencyRequest, IdempotencyStore, IdempotentTool, MockTool,
+    PersistentIdempotentTool, Tool, ToolContext, ToolError, ToolExecutionMode, ToolExecutor,
     ToolFuture, ToolInvocation, ToolRegistry, ToolResult,
 };
 

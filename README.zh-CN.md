@@ -151,7 +151,43 @@ cargo run -p agentscope-state-sqlite --example restart -- pause /tmp/agentscope-
 cargo run -p agentscope-state-sqlite --example restart -- resume /tmp/agentscope-demo.db
 ```
 
-本插件保存 Agent 状态，不保存 `IdempotentTool` 的结果缓存。幂等记录持久化仍是后续 TODO。
+本插件保存 Agent 状态，不保存 `IdempotentTool` 的结果缓存。工具持久化去重使用下面的独立插件。
+
+### SQLite 幂等记录插件
+
+`agentscope-idempotency-sqlite` 实现核心 `IdempotencyStore` 接口。使用稳定的租户/工具版本
+命名空间注册 `PersistentIdempotentTool`：
+
+```rust
+let store = SQLiteIdempotencyStore::open("agent.db").await?;
+registry.register(PersistentIdempotentTool::new("tenant-a:notes:v1", my_tool, store)?)?;
+```
+
+工具执行前先原子保存执行权记录。命名空间、工具名、幂等键、JSON 参数及完整上下文
+相同的请求，重启后也会复用已完成结果（包括成功和错误）。同键参数或上下文冲突会
+被拒绝。与内存包装器不同，未完成调用的并发重复请求立即返回 `idempotency_in_doubt`，
+不会等待或接管执行。取消、panic 和完成结果写入失败会留下不确定记录，Agent 也会
+保留对应执行检查点。
+
+先确保原工作进程已停止或无法再产生副作用，并核对外部执行结果，再以原
+`IdempotencyRequest` 调用 `store.reconcile(request, verified_result).await?`。
+随后调用 `agent.retry_tool_execution(reply_id)`，即可读取已核对结果并继续会话，无需
+再次执行该工具。已完成结果不可覆盖。单独调用 `resolve_tool_execution` 只更新 Agent
+状态，不会同步修改独立的幂等记录。
+
+记录不会自动过期或触发重试。数据库保存完整输入、上下文元数据和输出，应作为应用
+数据保护。外部副作用与 SQLite 不在同一事务内，执行中断仍需核对结果；记录保留策略
+留作后续扩展。
+
+用两个独立进程运行示例，`first` 使用新的数据库路径：
+
+```shell
+cargo run -p agentscope-idempotency-sqlite --example idempotency_restart -- first /tmp/agentscope-idempotency.db
+cargo run -p agentscope-idempotency-sqlite --example idempotency_restart -- replay /tmp/agentscope-idempotency.db
+```
+
+第一个进程执行一次工具，第二个进程执行零次并返回相同结果。两个 SQLite 插件可共用
+一个数据库文件。
 
 ## 路线图 / TODO
 
@@ -196,7 +232,8 @@ cargo run -p agentscope-state-sqlite --example restart -- resume /tmp/agentscope
 - [x] 定义可作为 trait 对象使用的异步工具接口
 - [x] 支持顺序或并发执行批量工具调用
 - [x] 支持有容量上限的进程内工具幂等去重
-- [ ] 支持持久化幂等记录与外部结果核对
+- [x] 支持持久化幂等记录与外部结果核对
+- [ ] 支持幂等记录查询管理与保留策略
 - [ ] 支持流式工具执行
 - [x] 实现工具注册表和 JSON Schema 输入校验
 - [ ] 从 Rust 类型生成 JSON Schema

@@ -15,7 +15,7 @@ default = []
 sqlite = ["dep:tokio-rusqlite"]
 
 [workspace]
-members = ["plugins/agentscope-state-sqlite"]
+members = ["plugins/agentscope-state-sqlite", "plugins/agentscope-idempotency-sqlite"]
 resolver = "3"
 
 [lib]
