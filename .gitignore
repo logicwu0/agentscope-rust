@@ -7,3 +7,5 @@ Cargo.lock
 .vscode/
 .env
 .env.*
+/agentscope-chat.db
+/agentscope-chat.db-*

@@ -222,6 +222,37 @@ cargo run -p agentscope-idempotency-sqlite --example idempotency_restart -- repl
 The first process executes once; the replay process executes zero tools and
 returns the same result. Both SQLite plugins can share the same database file.
 
+### Interactive command-line chat
+
+The `agentscope-chat` workspace example combines streaming chat, human-confirmed
+`multiply` calls, SQLite agent state, and durable tool deduplication:
+
+```shell
+# No API key or network required:
+cargo run -p agentscope-chat -- --offline --session demo
+# With DEEPSEEK_API_KEY already exported in your local environment:
+cargo run -p agentscope-chat -- --user alice --session deepseek
+```
+
+Try `multiply 6 7`, exit with `/quit` while approval is pending, then restart with
+the same database, user, and session and enter `/approve`. Use `/history` to see
+the restored conversation. Offline mode echoes ordinary messages and only parses
+`multiply A B`; it is a deterministic demo, not a language model.
+
+Commands: `/help`, `/status`, `/history`, `/approve` (all pending calls),
+`/deny [reason]` (all pending calls), `/retry`, `/resolve CALL_ID VERIFIED_TEXT`,
+and `/quit`. Reconciliation accepts verified successful text results and updates
+the idempotency store; then `/retry` continues using cached results. Check the
+external outcome and stop the original worker before resolving an uncertain call.
+
+Ordinary chat is streamed; replies after approval/recovery currently use the
+non-streaming resume API. Use one process per session. `/quit` or EOF between
+turns preserves completed state; forcefully exiting during generation can lose
+uncommitted text. The default database is `agentscope-chat.db` (gitignored);
+`--db PATH` selects another file. API keys are read only from the environment,
+never from chat input or a CLI flag. Local `.env` files are not automatically read.
+Use different sessions for offline tests and real conversations.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -296,7 +327,8 @@ after they have been exercised by working examples.
 - [ ] Add external tool execution and persisted permission rules
 - [ ] Add per-session resumable interruption
 - [x] Add the independent SQLite `StateStore` plugin
-- [ ] Provide single-agent and multi-agent examples
+- [x] Provide an interactive single-agent CLI with durable session recovery
+- [ ] Provide multi-agent examples
 
 ### Storage Plugins
 

@@ -189,6 +189,33 @@ cargo run -p agentscope-idempotency-sqlite --example idempotency_restart -- repl
 第一个进程执行一次工具，第二个进程执行零次并返回相同结果。两个 SQLite 插件可共用
 一个数据库文件。
 
+### 交互式命令行聊天
+
+workspace 示例 `agentscope-chat` 串联了流式聊天、`multiply` 工具人工确认、SQLite
+会话状态与持久化幂等去重：
+
+```shell
+# 离线模式，不需要 API Key 或网络：
+cargo run -p agentscope-chat -- --offline --session demo
+# 本地环境已导出 DEEPSEEK_API_KEY 后：
+cargo run -p agentscope-chat -- --user alice --session deepseek
+```
+
+输入 `multiply 6 7`，在待确认时 `/quit` 退出；用相同数据库、用户和会话重新启动后，
+输入 `/approve` 继续执行。通过 `/history` 查看恢复的对话。离线模式只回显普通消息并
+解析 `multiply A B`，用于确定性验证，不是真实语言模型。
+
+命令包括 `/help`、`/status`、`/history`、`/approve`（批准全部待确认调用）、
+`/deny [原因]`（拒绝全部）、`/retry`、`/resolve CALL_ID 已核对的结果文本`、`/quit`。
+`/resolve` 接受已核对的成功文本结果并写入幂等存储，随后 `/retry` 复用结果继续会话。
+处理不确定调用前，应先核对外部结果并停止原执行进程。
+
+普通聊天使用流式输出，批准/恢复后的回答目前使用非流式恢复接口。同一会话请只运行
+一个进程。轮次之间 `/quit` 或输入结束会保留完成状态；生成中强制退出可能丢失尚未
+提交的文本。默认数据库为 `agentscope-chat.db`（已加入 gitignore），可用 `--db PATH`
+指定其他路径。API Key 仅从环境变量读取，不通过聊天输入或命令行参数传递，也不会
+自动读取本地 `.env` 文件。离线测试与真实聊天建议使用不同会话。
+
 ## 路线图 / TODO
 
 项目将采用渐进式开发。只有经过可运行示例验证的接口，才会逐步进入稳定状态。
@@ -262,7 +289,8 @@ cargo run -p agentscope-idempotency-sqlite --example idempotency_restart -- repl
 - [ ] 支持外部工具执行与持久化权限规则
 - [ ] 支持会话级可恢复中断
 - [x] 添加独立的 SQLite `StateStore` 插件
-- [ ] 提供单 Agent 与多 Agent 示例
+- [x] 提供带持久化会话恢复的交互式单 Agent 命令行示例
+- [ ] 提供多 Agent 示例
 
 ### 存储插件
 
