@@ -1,5 +1,6 @@
 //! Minimal non-streaming `ReAct` agent loop.
 
+mod recovery_stream;
 mod streaming;
 
 use std::{
@@ -955,6 +956,29 @@ impl Agent for ReActAgent {
 
     fn retry_tool_execution(&self, reply_id: String) -> AgentFuture<'_, Msg> {
         Self::retry_tool_execution(self, reply_id)
+    }
+
+    fn stream_resume_tool_calls(
+        &self,
+        reply_id: String,
+        confirmations: Vec<ToolConfirmation>,
+    ) -> AgentFuture<'_, AgentEventStream<'_>> {
+        Self::stream_resume_tool_calls(self, reply_id, confirmations)
+    }
+
+    fn stream_retry_tool_execution(
+        &self,
+        reply_id: String,
+    ) -> AgentFuture<'_, AgentEventStream<'_>> {
+        Self::stream_retry_tool_execution(self, reply_id)
+    }
+
+    fn stream_resolve_tool_execution(
+        &self,
+        reply_id: String,
+        results: Vec<ToolResultBlock>,
+    ) -> AgentFuture<'_, AgentEventStream<'_>> {
+        Self::stream_resolve_tool_execution(self, reply_id, results)
     }
 
     fn interrupt_handle(&self) -> AgentInterruptHandle {

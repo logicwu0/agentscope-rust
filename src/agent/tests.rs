@@ -13,6 +13,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use tokio::sync::Barrier;
 
+mod recovery_stream;
 mod retry;
 
 use crate::{

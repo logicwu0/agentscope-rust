@@ -58,6 +58,8 @@ async fn separate_processes_restore_chat_and_confirmation() {
     let second = run(&db, "one", "/approve\nagain\n/history\n/quit\n");
     assert!(second.contains("Approval required"));
     assert!(second.contains("42"));
+    assert!(second.contains("[tool started] multiply"));
+    assert!(second.contains("[tool finished] multiply: Success"));
     assert!(second.contains("Offline turn 3: again"));
     assert!(
         store

@@ -245,13 +245,29 @@ and `/quit`. Reconciliation accepts verified successful text results and updates
 the idempotency store; then `/retry` continues using cached results. Check the
 external outcome and stop the original worker before resolving an uncertain call.
 
-Ordinary chat is streamed; replies after approval/recovery currently use the
-non-streaming resume API. Use one process per session. `/quit` or EOF between
+Chat and replies after approval/recovery are streamed, with tool start/finish
+events shown by the CLI. Use one process per session. `/quit` or EOF between
 turns preserves completed state; forcefully exiting during generation can lose
 uncommitted text. The default database is `agentscope-chat.db` (gitignored);
 `--db PATH` selects another file. API keys are read only from the environment,
 never from chat input or a CLI flag. Local `.env` files are not automatically read.
 Use different sessions for offline tests and real conversations.
+
+The object-safe agent API now also offers `stream_resume_tool_calls`,
+`stream_retry_tool_execution`, and `stream_resolve_tool_execution`. Each returns
+an `AgentEventStream`; the existing non-streaming methods remain available.
+Validation happens before returning the stream, while tool execution starts only
+when polled. Step numbers and the original maximum-step budget are preserved.
+Externally supplied results emit `ToolFinished` without a `ToolStarted` event.
+
+Recovery streams save execution checkpoints before tools and save completed tool
+observations before continuing the model. Tool start events precede batch
+execution; finish events follow batch completion in call order. Consume through
+the terminal event for the final save; save failures become terminal errors.
+Dropping during tool execution leaves a checkpoint to reconcile/retry. Dropping
+during subsequent model output retains tool results but discards partial text;
+send a new message to continue from the saved conversation. The original worker
+must be stopped before another process retries or reconciles the same session.
 
 ## Roadmap / TODO
 
@@ -321,6 +337,7 @@ after they have been exercised by working examples.
 - [x] Add versioned manual agent state snapshot and atomic restoration
 - [x] Add a revisioned per-session `StateStore` and automatic restoration
 - [x] Add persisted tool-confirmation checkpoints and resume decisions
+- [x] Stream confirmation, retry, and external-result continuations
 - [x] Persist approved-tool execution checkpoints and stable idempotency keys
 - [x] Reconcile uncertain tool executions with externally supplied results
 - [x] Explicitly retry uncertain executions using the original idempotency keys

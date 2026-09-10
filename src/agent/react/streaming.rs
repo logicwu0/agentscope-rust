@@ -102,18 +102,19 @@ impl ReActAgent {
             }
             history.push(message);
             let system_prompt = self.system_prompt.as_ref().map(Msg::system);
-            Ok(self.agent_event_stream(history, system_prompt, interrupt))
+            Ok(self.agent_event_stream(history, system_prompt, interrupt, 0))
         })
     }
 
-    fn agent_event_stream(
+    pub(super) fn agent_event_stream(
         &self,
         mut history: Vec<Msg>,
         system_prompt: Option<Msg>,
         interrupt: AgentInterruptToken,
+        start_step: usize,
     ) -> AgentEventStream<'_> {
         Box::pin(stream! {
-            for step_index in 0..self.max_steps {
+            for step_index in start_step..self.max_steps {
                 let step = step_index + 1;
                 if let Err(error) = ensure_not_interrupted(&interrupt) {
                     yield Ok(error_event(step, error));

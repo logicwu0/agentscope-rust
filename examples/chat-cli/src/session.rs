@@ -52,7 +52,7 @@ impl Session {
     pub async fn handle(&self, line: &str) -> Result<()> {
         match line {
             "/help" => println!(
-                "/status /history /approve /deny [reason] /retry /resolve CALL_ID VERIFIED_TEXT /quit\nOrdinary messages stream; approval/recovery replies are non-streaming.\nOffline tool prompt: multiply 6 7. Input is one line at a time. Use one process per session."
+                "/status /history /approve /deny [reason] /retry /resolve CALL_ID VERIFIED_TEXT /quit\nChat, approval, and recovery replies stream with tool progress.\nOffline tool prompt: multiply 6 7. Input is one line at a time. Use one process per session."
             ),
             "/status" => self.status().await?,
             "/history" => {
@@ -72,9 +72,9 @@ impl Session {
                 let execution = state
                     .pending_tool_execution()
                     .ok_or("No uncertain execution")?;
-                self.show_reply(
+                self.show_stream(
                     self.agent
-                        .retry_tool_execution(execution.confirmation().reply_id())
+                        .stream_retry_tool_execution(execution.confirmation().reply_id())
                         .await,
                 )
                 .await?;
@@ -100,30 +100,35 @@ impl Session {
                 None => ToolConfirmation::approve(call.id()),
             })
             .collect();
-        self.show_reply(
+        self.show_stream(
             self.agent
-                .resume_tool_calls(pending.reply_id(), decisions)
+                .stream_resume_tool_calls(pending.reply_id(), decisions)
                 .await,
         )
         .await
     }
 
-    async fn show_reply(&self, result: agentscope::AgentResult<Msg>) -> Result<()> {
-        match result {
-            Ok(msg) => println!("assistant> {}", msg.text_content("").unwrap_or_default()),
-            Err(
-                AgentError::ToolConfirmationRequired { .. }
-                | AgentError::ToolExecutionInDoubt { .. },
-            ) => self.status().await?,
-            Err(error) => return Err(error.into()),
+    async fn show_error(&self, error: AgentError) -> Result<()> {
+        match error {
+            AgentError::ToolConfirmationRequired { .. }
+            | AgentError::ToolExecutionInDoubt { .. } => self.status().await?,
+            error => return Err(error.into()),
         }
         Ok(())
     }
 
     async fn chat(&self, line: &str) -> Result<()> {
-        let mut events = match self.agent.stream(Msg::user(line)).await {
+        self.show_stream(self.agent.stream(Msg::user(line)).await)
+            .await
+    }
+
+    async fn show_stream(
+        &self,
+        result: agentscope::AgentResult<agentscope::AgentEventStream<'_>>,
+    ) -> Result<()> {
+        let mut events = match result {
             Ok(events) => events,
-            Err(error) => return self.show_reply(Err(error)).await,
+            Err(error) => return self.show_error(error).await,
         };
         print!("assistant> ");
         io::stdout().flush()?;
@@ -136,9 +141,16 @@ impl Session {
                     io::stdout().flush()?;
                 }
                 AgentEvent::ToolConfirmationRequired { .. } => paused = true,
+                AgentEvent::ToolStarted { call, .. } => {
+                    println!("\n[tool started] {} {}", call.name(), call.input());
+                }
+                AgentEvent::ToolFinished { result, .. } => {
+                    println!("[tool finished] {}: {:?}", result.name(), result.state());
+                }
                 AgentEvent::Error { error, .. } => {
                     println!();
-                    return Err(error.into());
+                    drop(events);
+                    return self.show_error(error).await;
                 }
                 _ => {}
             }

@@ -80,6 +80,26 @@ pub trait Agent: Send + Sync {
     /// their original idempotency keys. Tools must honor those keys to deduplicate effects.
     fn retry_tool_execution(&self, reply_id: String) -> AgentFuture<'_, Msg>;
 
+    /// Approves/denies pending calls and streams tools and the continuing reply.
+    fn stream_resume_tool_calls(
+        &self,
+        reply_id: String,
+        confirmations: Vec<ToolConfirmation>,
+    ) -> AgentFuture<'_, AgentEventStream<'_>>;
+
+    /// Explicitly retries uncertain calls and streams the continuing reply.
+    fn stream_retry_tool_execution(
+        &self,
+        reply_id: String,
+    ) -> AgentFuture<'_, AgentEventStream<'_>>;
+
+    /// Supplies verified tool results and streams the continuing reply.
+    fn stream_resolve_tool_execution(
+        &self,
+        reply_id: String,
+        results: Vec<crate::ToolResultBlock>,
+    ) -> AgentFuture<'_, AgentEventStream<'_>>;
+
     /// Returns a handle that can interrupt in-flight replies on this agent.
     fn interrupt_handle(&self) -> AgentInterruptHandle;
 }
