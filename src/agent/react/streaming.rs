@@ -393,17 +393,6 @@ impl ReActAgent {
             }
         })
     }
-
-    fn chat_request(&self, history: &[Msg], system_prompt: Option<&Msg>) -> ChatRequest {
-        ChatRequest::new(
-            system_prompt
-                .into_iter()
-                .cloned()
-                .chain(history.iter().cloned()),
-        )
-        .with_options(self.options.clone())
-        .with_tools(self.tools.registry().definitions())
-    }
 }
 
 fn error_event(step: usize, error: AgentError) -> AgentEvent {

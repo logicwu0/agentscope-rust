@@ -228,6 +228,30 @@ cargo run -p agentscope-chat -- --user alice --session deepseek
 丢弃流会保留工具结果，但不保存部分文本，可发送新消息继续已保存的对话。另一个进程
 重试或核对同一会话前，必须先停止原执行进程。
 
+### 模型输入上下文策略
+
+`ReActAgent` 默认使用 `FullContext`，发送完整历史。可显式选择最近 N 个用户轮次：
+
+```rust
+use agentscope::RecentTurns;
+
+let agent = agent.with_context_policy(RecentTurns::new(3)?);
+```
+
+一个轮次从 `Role::User` 消息开始，包含之后的模型和工具消息，直到下一条用户消息；
+N 包含当前轮，必须大于零。系统消息以及 Agent 配置的系统提示词始终保留。历史不足
+N 轮时不裁剪。遇到跨轮工具结果会向前扩展到对应调用所在轮，保留完整工具往返，
+因此这不是严格的消息数或 Token 上限，也不会修复原本就不完整的历史。
+
+策略只影响每次模型请求，不改变 `Memory`、快照或 `StateStore` 中的完整历史。
+普通、流式、确认、重试及外部结果恢复路径共用同一套组装逻辑，模型调用前的 Hook
+看到的是裁剪后的请求。策略是运行时配置，重建 Agent 时需要重新设置，不随状态保存。
+可实现同步的 `ContextPolicy` trait 自定义选择逻辑；自定义策略必须保证消息顺序、
+当前轮和工具调用/结果配对，不应执行 I/O。共享策略使用 `with_shared_context_policy`。
+
+这一阶段不包含 Token 估算、自动摘要、检索或大工具结果卸载。离线验证：
+`cargo run --example context`，模型最后一次看到 2 条消息，而快照保留全部 6 条历史。
+
 ## 路线图 / TODO
 
 项目将采用渐进式开发。只有经过可运行示例验证的接口，才会逐步进入稳定状态。
@@ -282,6 +306,8 @@ cargo run -p agentscope-chat -- --user alice --session deepseek
 
 ### 里程碑 4——记忆与 Agent
 
+- [x] 模型输入 `ContextPolicy` 与最近用户轮次裁剪，保持完整持久化历史
+- [ ] 上下文 Token 预算、摘要压缩与大工具结果卸载
 - [x] 定义可作为 trait 对象使用的异步 `Memory` trait
 - [x] 定义可作为 trait 对象使用的异步 `Agent` trait
 - [x] 实现线程安全的内存会话历史

@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod context;
 pub mod memory;
 pub mod message;
 pub mod model;
@@ -15,6 +16,7 @@ pub use agent::{
     ReActAgent, StateKey, StateRecord, StateStore, StateStoreError, StateStoreFuture,
     StateStoreResult, ToolConfirmation, ToolConfirmationDecision,
 };
+pub use context::{ContextPolicy, FullContext, RecentTurns, ZeroContextTurns};
 #[cfg(feature = "sqlite")]
 pub use memory::SQLiteMemory;
 pub use memory::{InMemoryMemory, Memory, MemoryError, MemoryFuture, MemoryResult};

@@ -13,8 +13,8 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 use crate::{
-    AgentEventStream, AgentHook, AgentHookEvent, ContentBlock, GenerateOptions, Msg, Role,
-    ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState,
+    AgentEventStream, AgentHook, AgentHookEvent, ContentBlock, ContextPolicy, FullContext,
+    GenerateOptions, Msg, Role, ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState,
     memory::Memory,
     model::{ChatModel, ChatRequest, FinishReason},
     tool::{ToolContext, ToolExecutionMode, ToolExecutor},
@@ -40,6 +40,7 @@ pub struct ReActAgent {
     max_steps: usize,
     system_prompt: Option<String>,
     options: GenerateOptions,
+    context_policy: Arc<dyn ContextPolicy>,
     memory: Option<Arc<dyn Memory>>,
     hooks: Vec<Arc<dyn AgentHook>>,
     interrupt: AgentInterruptHandle,
@@ -95,6 +96,7 @@ impl ReActAgent {
             max_steps: DEFAULT_MAX_STEPS,
             system_prompt: None,
             options: GenerateOptions::new(),
+            context_policy: Arc::new(FullContext),
             memory: None,
             hooks: Vec::new(),
             interrupt: AgentInterruptHandle::new(),
@@ -129,6 +131,24 @@ impl ReActAgent {
     #[must_use]
     pub fn with_options(mut self, options: GenerateOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Sets model-input history selection without changing stored history.
+    ///
+    /// Defaults to [`FullContext`]. Applied on every model step, including
+    /// streaming and recovered replies. This runtime configuration is not part
+    /// of state snapshots; configure it again when rebuilding an agent.
+    #[must_use]
+    pub fn with_context_policy<P: ContextPolicy + 'static>(mut self, policy: P) -> Self {
+        self.context_policy = Arc::new(policy);
+        self
+    }
+
+    /// Sets a shared model-input history policy.
+    #[must_use]
+    pub fn with_shared_context_policy(mut self, policy: Arc<dyn ContextPolicy>) -> Self {
+        self.context_policy = policy;
         self
     }
 
@@ -420,10 +440,7 @@ impl ReActAgent {
             let system_prompt = self.system_prompt.as_ref().map(Msg::system);
             for step in start_step..self.max_steps {
                 ensure_not_interrupted(&interrupt)?;
-                let request_messages = system_prompt.iter().cloned().chain(history.iter().cloned());
-                let request = ChatRequest::new(request_messages)
-                    .with_options(self.options.clone())
-                    .with_tools(self.tools.registry().definitions());
+                let request = self.chat_request(&history, system_prompt.as_ref());
                 self.notify_hooks(&AgentHookEvent::BeforeModelCall {
                     step: step + 1,
                     request: request.clone(),
@@ -986,6 +1003,20 @@ impl Agent for ReActAgent {
     }
 }
 
+impl ReActAgent {
+    // All normal and recovery loops use the same model-input assembly.
+    fn chat_request(&self, history: &[Msg], system_prompt: Option<&Msg>) -> ChatRequest {
+        ChatRequest::new(
+            system_prompt
+                .into_iter()
+                .cloned()
+                .chain(self.context_policy.select_messages(history)),
+        )
+        .with_options(self.options.clone())
+        .with_tools(self.tools.registry().definitions())
+    }
+}
+
 impl fmt::Debug for ReActAgent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1009,7 +1040,7 @@ impl fmt::Debug for ReActAgent {
                 "pending_tool_execution",
                 &lock(&self.pending_tool_execution).as_ref(),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

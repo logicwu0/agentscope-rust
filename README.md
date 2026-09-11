@@ -269,6 +269,38 @@ during subsequent model output retains tool results but discards partial text;
 send a new message to continue from the saved conversation. The original worker
 must be stopped before another process retries or reconciles the same session.
 
+### Model-input context policies
+
+`ReActAgent` defaults to `FullContext`, sending the entire history. Opt into a
+recent-user-turn window explicitly:
+
+```rust
+use agentscope::RecentTurns;
+
+let agent = agent.with_context_policy(RecentTurns::new(3)?);
+```
+
+A turn starts at a `Role::User` message and includes subsequent model/tool
+messages until the next user message. N includes the current turn and must be
+positive. Historical system messages and the configured system prompt are always
+retained. Histories with no more than N user turns are unchanged. A boundary
+crossing a tool-call/result pair expands backwards to the call's turn, retaining
+the complete exchange. This is not a strict message/token limit and does not
+repair already malformed histories.
+
+Selection affects only each model request, never the complete history in
+`Memory`, snapshots, or `StateStore`. Normal, streaming, confirmation, retry, and
+external-result recovery paths share the same assembly logic. Before-model hooks
+see the selected request. Policies are runtime configuration, not persisted
+state; reconfigure them when rebuilding an agent. Implement the synchronous
+`ContextPolicy` trait for custom selection, preserving ordering, the active turn,
+and tool-call/result pairs without performing I/O. Use
+`with_shared_context_policy` to attach a shared policy.
+
+Token estimation, automatic summaries, retrieval, and oversized-result offload
+are not included yet. Run `cargo run --example context` offline: the final model
+input contains 2 messages while the snapshot retains all 6 history messages.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -324,6 +356,8 @@ after they have been exercised by working examples.
 
 ### Milestone 4 — Memory and Agents
 
+- [x] Model-input `ContextPolicy` and recent-user-turn selection without pruning durable history
+- [ ] Context token budgets, summarization, and oversized tool-result offload
 - [x] Define an object-safe asynchronous `Memory` trait
 - [x] Define an object-safe asynchronous `Agent` trait
 - [x] Implement thread-safe in-memory conversation history
