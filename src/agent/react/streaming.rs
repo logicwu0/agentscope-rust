@@ -116,22 +116,15 @@ impl ReActAgent {
         Box::pin(stream! {
             for step_index in start_step..self.max_steps {
                 let step = step_index + 1;
-                if let Err(error) = ensure_not_interrupted(&interrupt) {
-                    yield Ok(error_event(step, error));
-                    return;
-                }
-                let request = self.chat_request(&history, system_prompt.as_ref());
-                if let Err(error) = self.notify_hooks(&AgentHookEvent::BeforeModelCall {
-                    step,
-                    request: request.clone(),
-                }).await {
-                    yield Ok(error_event(step, error));
-                    return;
-                }
-                if let Err(error) = ensure_not_interrupted(&interrupt) {
-                    yield Ok(error_event(step, error));
-                    return;
-                }
+                let request = match self.prepare_model_request(
+                    &history, system_prompt.as_ref(), step, &interrupt,
+                ).await {
+                    Ok(request) => request,
+                    Err(error) => {
+                        yield Ok(error_event(step, error));
+                        return;
+                    }
+                };
                 let mut model_step = self.model_step(step, request, interrupt.clone());
                 let mut completed_response = None;
                 while let Some(item) = model_step.next().await {

@@ -16,7 +16,10 @@ pub use agent::{
     ReActAgent, StateKey, StateRecord, StateStore, StateStoreError, StateStoreFuture,
     StateStoreResult, ToolConfirmation, ToolConfirmationDecision,
 };
-pub use context::{ContextPolicy, FullContext, RecentTurns, ZeroContextTurns};
+pub use context::{
+    ContextPolicy, FullContext, HeuristicTokenCounter, RecentTurns, TokenBudget, TokenBudgetError,
+    TokenCount, TokenCountAccuracy, TokenCounter, ZeroContextTurns,
+};
 #[cfg(feature = "sqlite")]
 pub use memory::SQLiteMemory;
 pub use memory::{InMemoryMemory, Memory, MemoryError, MemoryFuture, MemoryResult};

@@ -108,6 +108,8 @@ pub trait Agent: Send + Sync {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum AgentError {
+    /// Model-input counting or context-window budgeting failed.
+    TokenBudget(crate::TokenBudgetError),
     /// The configured agent name was empty.
     EmptyName,
     /// The configured model/tool iteration limit was zero.
@@ -170,6 +172,7 @@ pub enum AgentError {
 impl fmt::Display for AgentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TokenBudget(error) => write!(formatter, "agent token budget failed: {error}"),
             Self::EmptyName => formatter.write_str("agent name cannot be empty"),
             Self::ZeroMaxSteps => formatter.write_str("agent max_steps must be greater than zero"),
             Self::Model(error) => write!(formatter, "agent model failed: {error}"),
@@ -227,6 +230,7 @@ impl fmt::Display for AgentError {
 impl std::error::Error for AgentError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::TokenBudget(error) => Some(error),
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),
             Self::Memory(error) => Some(error),

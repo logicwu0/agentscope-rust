@@ -41,6 +41,7 @@ pub struct ReActAgent {
     system_prompt: Option<String>,
     options: GenerateOptions,
     context_policy: Arc<dyn ContextPolicy>,
+    token_budget: Option<crate::TokenBudget>,
     memory: Option<Arc<dyn Memory>>,
     hooks: Vec<Arc<dyn AgentHook>>,
     interrupt: AgentInterruptHandle,
@@ -97,6 +98,7 @@ impl ReActAgent {
             system_prompt: None,
             options: GenerateOptions::new(),
             context_policy: Arc::new(FullContext),
+            token_budget: None,
             memory: None,
             hooks: Vec::new(),
             interrupt: AgentInterruptHandle::new(),
@@ -149,6 +151,16 @@ impl ReActAgent {
     #[must_use]
     pub fn with_shared_context_policy(mut self, policy: Arc<dyn ContextPolicy>) -> Self {
         self.context_policy = policy;
+        self
+    }
+
+    /// Enables per-request input budgeting after context selection.
+    ///
+    /// Disabled by default. Reserves output space and drops complete old turns
+    /// without deleting stored history. Reconfigure after rebuilding from state.
+    #[must_use]
+    pub fn with_token_budget(mut self, budget: crate::TokenBudget) -> Self {
+        self.token_budget = Some(budget);
         self
     }
 
@@ -439,14 +451,9 @@ impl ReActAgent {
         Box::pin(async move {
             let system_prompt = self.system_prompt.as_ref().map(Msg::system);
             for step in start_step..self.max_steps {
-                ensure_not_interrupted(&interrupt)?;
-                let request = self.chat_request(&history, system_prompt.as_ref());
-                self.notify_hooks(&AgentHookEvent::BeforeModelCall {
-                    step: step + 1,
-                    request: request.clone(),
-                })
-                .await?;
-                ensure_not_interrupted(&interrupt)?;
+                let request = self
+                    .prepare_model_request(&history, system_prompt.as_ref(), step + 1, &interrupt)
+                    .await?;
                 let response = self.generate_response(request, &mut interrupt).await?;
                 if !response.is_last {
                     return Err(AgentError::InvalidModelResponse(
@@ -1004,16 +1011,42 @@ impl Agent for ReActAgent {
 }
 
 impl ReActAgent {
+    async fn prepare_model_request(
+        &self,
+        history: &[Msg],
+        system_prompt: Option<&Msg>,
+        step: usize,
+        interrupt: &super::interrupt::AgentInterruptToken,
+    ) -> AgentResult<ChatRequest> {
+        ensure_not_interrupted(interrupt)?;
+        let request = self.chat_request(history, system_prompt)?;
+        self.notify_hooks(&AgentHookEvent::BeforeModelCall {
+            step,
+            request: request.clone(),
+        })
+        .await?;
+        ensure_not_interrupted(interrupt)?;
+        Ok(request)
+    }
+
     // All normal and recovery loops use the same model-input assembly.
-    fn chat_request(&self, history: &[Msg], system_prompt: Option<&Msg>) -> ChatRequest {
-        ChatRequest::new(
+    fn chat_request(
+        &self,
+        history: &[Msg],
+        system_prompt: Option<&Msg>,
+    ) -> AgentResult<ChatRequest> {
+        let request = ChatRequest::new(
             system_prompt
                 .into_iter()
                 .cloned()
                 .chain(self.context_policy.select_messages(history)),
         )
         .with_options(self.options.clone())
-        .with_tools(self.tools.registry().definitions())
+        .with_tools(self.tools.registry().definitions());
+        match &self.token_budget {
+            Some(budget) => budget.apply(request).map_err(AgentError::TokenBudget),
+            None => Ok(request),
+        }
     }
 }
 

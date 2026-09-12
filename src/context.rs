@@ -4,6 +4,12 @@ use std::{collections::BTreeMap, fmt, num::NonZeroUsize};
 
 use crate::{ContentBlock, Msg, Role};
 
+mod budget;
+pub use budget::{
+    HeuristicTokenCounter, TokenBudget, TokenBudgetError, TokenCount, TokenCountAccuracy,
+    TokenCounter,
+};
+
 /// Selects history for each model call without modifying stored messages.
 ///
 /// The configured agent system prompt is prepended separately. Implementations

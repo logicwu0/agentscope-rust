@@ -297,9 +297,53 @@ state; reconfigure them when rebuilding an agent. Implement the synchronous
 and tool-call/result pairs without performing I/O. Use
 `with_shared_context_policy` to attach a shared policy.
 
-Token estimation, automatic summaries, retrieval, and oversized-result offload
-are not included yet. Run `cargo run --example context` offline: the final model
+Automatic summaries, retrieval, and oversized-result offload are not included
+yet. Run `cargo run --example context` offline: the final model
 input contains 2 messages while the snapshot retains all 6 history messages.
+
+### Per-request token budgets
+
+Optionally apply a context-window budget **after** context selection:
+
+```rust
+use agentscope::TokenBudget;
+
+// Choose limits appropriate for your model; these are example values.
+let agent = agent.with_token_budget(TokenBudget::new(8192, 1024)?);
+```
+
+This reserves 1024 output tokens and permits 7168 input tokens, including system
+messages, tool definitions, and history. The output reservation must be positive
+and smaller than the window. When `GenerateOptions::max_tokens` is absent it is
+set to the reservation; a smaller positive value is preserved, but zero or a
+larger value is rejected. Do not override that cap with provider-specific options.
+The full reservation remains deducted even if the explicit output cap is smaller.
+
+The default `HeuristicTokenCounter` reports **Estimated**, using serialized input
+UTF-8 bytes divided by three (rounded up), plus 16. It includes message roles,
+names, content, tools, structured-output schema, and extra provider options. It
+is not a model tokenizer or a guaranteed upper bound. Leave headroom or attach
+a model-specific `TokenCounter` via `with_counter` / `with_shared_counter`; the
+counter returns `TokenCount` with `Estimated` or `Exact` accuracy. Exactness is
+the custom counter's responsibility, including model-specific wire formatting.
+The heuristic rejects multimodal messages/tool results instead of guessing their
+cost from URLs or base64. Counter failures stop the request without sending it.
+
+If over budget, complete old user turns are removed and the request is counted
+again, retaining system messages and tool dependencies. If protected content
+still cannot fit, `AgentError::TokenBudget(TokenBudgetError::Exceeded { .. })`
+reports the count, its accuracy, input allowance and output reservation. Streaming
+paths emit a terminal error instead of success. Existing context policies must
+still preserve the active turn and call/result pairs.
+
+The full history remains stored, including a newly submitted user message on a
+budget failure. If overflow occurs after a tool has completed, its observation
+is retained; recovery paths also save it and clear the completed checkpoint.
+Adjust the budget/policy and continue the saved conversation; do not blindly
+retry an already completed tool. As with context policies, budget/counter settings
+are runtime configuration and must be reapplied after rebuilding the agent.
+This is per-request input budgeting, not a cumulative reply/cost limit or automatic
+summarization. Offline example: `cargo run --example token_budget`.
 
 ## Roadmap / TODO
 
@@ -357,7 +401,8 @@ after they have been exercised by working examples.
 ### Milestone 4 — Memory and Agents
 
 - [x] Model-input `ContextPolicy` and recent-user-turn selection without pruning durable history
-- [ ] Context token budgets, summarization, and oversized tool-result offload
+- [x] Per-request input token budgets, output reservation and replaceable token counters
+- [ ] Context summarization and oversized tool-result offload
 - [x] Define an object-safe asynchronous `Memory` trait
 - [x] Define an object-safe asynchronous `Agent` trait
 - [x] Implement thread-safe in-memory conversation history
