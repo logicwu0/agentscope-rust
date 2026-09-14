@@ -59,6 +59,16 @@ pub trait Agent: Send + Sync {
     /// Captures a versioned snapshot of configured conversation state.
     fn snapshot(&self) -> AgentFuture<'_, AgentState>;
 
+    /// Explicitly summarizes old completed turns, retaining at least one recent turn.
+    /// Returns `None` if there is no newly eligible prefix.
+    fn compact_context(
+        &self,
+        keep_recent_turns: usize,
+    ) -> AgentFuture<'_, Option<crate::ContextSummary>>;
+
+    /// Removes only the summary, making original history available again.
+    fn clear_context_summary(&self) -> AgentFuture<'_, ()>;
+
     /// Atomically restores a previously captured conversation state.
     fn restore(&self, state: AgentState) -> AgentFuture<'_, ()>;
 
@@ -108,6 +118,8 @@ pub trait Agent: Send + Sync {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum AgentError {
+    /// Explicit context compaction failed.
+    Summary(crate::SummaryError),
     /// Model-input counting or context-window budgeting failed.
     TokenBudget(crate::TokenBudgetError),
     /// The configured agent name was empty.
@@ -172,6 +184,7 @@ pub enum AgentError {
 impl fmt::Display for AgentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Summary(error) => write!(formatter, "{error}"),
             Self::TokenBudget(error) => write!(formatter, "agent token budget failed: {error}"),
             Self::EmptyName => formatter.write_str("agent name cannot be empty"),
             Self::ZeroMaxSteps => formatter.write_str("agent max_steps must be greater than zero"),
@@ -230,6 +243,7 @@ impl fmt::Display for AgentError {
 impl std::error::Error for AgentError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Summary(error) => Some(error),
             Self::TokenBudget(error) => Some(error),
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),

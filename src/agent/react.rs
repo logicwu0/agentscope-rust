@@ -1,5 +1,6 @@
 //! Minimal non-streaming `ReAct` agent loop.
 
+mod compaction;
 mod recovery_stream;
 mod streaming;
 
@@ -9,7 +10,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -49,6 +50,9 @@ pub struct ReActAgent {
     confirmation_tools: BTreeSet<String>,
     pending_tool_calls: Arc<Mutex<Option<PendingToolCalls>>>,
     pending_tool_execution: Arc<Mutex<Option<PendingToolExecution>>>,
+    context_summary: Arc<Mutex<Option<crate::ContextSummary>>>,
+    summarizer: Option<Arc<dyn crate::ContextSummarizer>>,
+    context_operations: Arc<RwLock<()>>,
 }
 
 struct StateBinding {
@@ -58,9 +62,10 @@ struct StateBinding {
 }
 
 struct StateOperation {
-    binding: Arc<StateBinding>,
+    binding: Option<Arc<StateBinding>>,
     expected_revision: Option<u64>,
-    _guard: OwnedMutexGuard<()>,
+    _guard: Option<OwnedMutexGuard<()>>,
+    context_guard: Option<OwnedRwLockReadGuard<()>>,
 }
 
 impl ReActAgent {
@@ -106,6 +111,9 @@ impl ReActAgent {
             confirmation_tools: BTreeSet::new(),
             pending_tool_calls: Arc::new(Mutex::new(None)),
             pending_tool_execution: Arc::new(Mutex::new(None)),
+            context_summary: Arc::new(Mutex::new(None)),
+            summarizer: None,
+            context_operations: Arc::new(RwLock::new(())),
         })
     }
 
@@ -710,8 +718,20 @@ impl ReActAgent {
     }
 
     async fn begin_state_operation(&self) -> AgentResult<Option<StateOperation>> {
+        let guard = self.context_operations.clone().read_owned().await;
+        let mut operation = self.begin_store_operation().await?;
+        operation.context_guard = Some(guard);
+        Ok(Some(operation))
+    }
+
+    async fn begin_store_operation(&self) -> AgentResult<StateOperation> {
         let Some(binding) = self.state_binding.clone() else {
-            return Ok(None);
+            return Ok(StateOperation {
+                binding: None,
+                expected_revision: None,
+                _guard: None,
+                context_guard: None,
+            });
         };
         let memory = self
             .memory
@@ -723,31 +743,31 @@ impl ReActAgent {
         if let Some(record) = record {
             let state = record.into_state();
             self.validate_state(&state)?;
-            let (messages, pending, execution) = state.into_parts();
+            let (messages, pending, execution, summary) = state.into_parts();
             memory.replace(messages).await?;
             *lock(&self.pending_tool_calls) = pending;
             *lock(&self.pending_tool_execution) = execution;
+            *lock(&self.context_summary) = summary;
         }
-        Ok(Some(StateOperation {
-            binding,
+        Ok(StateOperation {
+            binding: Some(binding),
             expected_revision,
-            _guard: guard,
-        }))
+            _guard: Some(guard),
+            context_guard: None,
+        })
     }
 
     async fn finish_state_operation(&self, operation: Option<StateOperation>) -> AgentResult<()> {
         let Some(operation) = operation else {
             return Ok(());
         };
+        let Some(binding) = &operation.binding else {
+            return Ok(());
+        };
         let state = self.snapshot_memory().await?;
-        operation
-            .binding
+        binding
             .store
-            .save(
-                operation.binding.key.clone(),
-                operation.expected_revision,
-                state,
-            )
+            .save(binding.key.clone(), operation.expected_revision, state)
             .await?;
         Ok(())
     }
@@ -759,15 +779,13 @@ impl ReActAgent {
         let Some(operation) = operation else {
             return Ok(());
         };
+        let Some(binding) = &operation.binding else {
+            return Ok(());
+        };
         let state = self.snapshot_memory().await?;
-        let record = operation
-            .binding
+        let record = binding
             .store
-            .save(
-                operation.binding.key.clone(),
-                operation.expected_revision,
-                state,
-            )
+            .save(binding.key.clone(), operation.expected_revision, state)
             .await?;
         operation.expected_revision = Some(record.revision());
         Ok(())
@@ -780,7 +798,8 @@ impl ReActAgent {
             .ok_or(AgentError::MemoryNotConfigured)?;
         Ok(AgentState::new(self.name.clone(), memory.messages().await?)
             .with_pending_tool_calls(lock(&self.pending_tool_calls).clone())
-            .with_pending_tool_execution(lock(&self.pending_tool_execution).clone()))
+            .with_pending_tool_execution(lock(&self.pending_tool_execution).clone())
+            .with_context_summary(lock(&self.context_summary).clone()))
     }
 
     async fn restore_memory(&self, state: AgentState) -> AgentResult<()> {
@@ -789,14 +808,23 @@ impl ReActAgent {
             .memory
             .as_ref()
             .ok_or(AgentError::MemoryNotConfigured)?;
-        let (messages, pending, execution) = state.into_parts();
+        let (messages, pending, execution, summary) = state.into_parts();
         memory.replace(messages).await?;
         *lock(&self.pending_tool_calls) = pending;
         *lock(&self.pending_tool_execution) = execution;
+        *lock(&self.context_summary) = summary;
         Ok(())
     }
 
     fn validate_state(&self, state: &AgentState) -> AgentResult<()> {
+        if let Some(summary) = state.context_summary() {
+            if state.format_version() < 4 {
+                return Err(AgentError::Summary(crate::SummaryError::StaleSource));
+            }
+            summary
+                .validate(state.messages())
+                .map_err(AgentError::Summary)?;
+        }
         if !(1..=AGENT_STATE_VERSION).contains(&state.format_version()) {
             return Err(AgentError::UnsupportedStateVersion {
                 found: state.format_version(),
@@ -938,6 +966,16 @@ impl ReActAgent {
 }
 
 impl Agent for ReActAgent {
+    fn compact_context(
+        &self,
+        keep_recent_turns: usize,
+    ) -> AgentFuture<'_, Option<crate::ContextSummary>> {
+        Self::compact_context(self, keep_recent_turns)
+    }
+
+    fn clear_context_summary(&self) -> AgentFuture<'_, ()> {
+        Self::clear_context_summary(self)
+    }
     fn name(&self) -> &str {
         &self.name
     }
@@ -1035,16 +1073,33 @@ impl ReActAgent {
         history: &[Msg],
         system_prompt: Option<&Msg>,
     ) -> AgentResult<ChatRequest> {
+        let summary = lock(&self.context_summary).clone();
+        self.chat_request_with_summary(history, system_prompt, summary.as_ref())
+    }
+
+    fn chat_request_with_summary(
+        &self,
+        history: &[Msg],
+        system_prompt: Option<&Msg>,
+        summary: Option<&crate::ContextSummary>,
+    ) -> AgentResult<ChatRequest> {
+        let projected = Self::summary_projection(history, summary)?;
+        let mut prefix = system_prompt.into_iter().cloned().collect::<Vec<_>>();
+        if let Some(summary) = summary {
+            prefix.push(summary.message());
+        }
+        let pinned = prefix.len();
         let request = ChatRequest::new(
-            system_prompt
+            prefix
                 .into_iter()
-                .cloned()
-                .chain(self.context_policy.select_messages(history)),
+                .chain(self.context_policy.select_messages(&projected)),
         )
         .with_options(self.options.clone())
         .with_tools(self.tools.registry().definitions());
         match &self.token_budget {
-            Some(budget) => budget.apply(request).map_err(AgentError::TokenBudget),
+            Some(budget) => budget
+                .apply_with_pinned_prefix(request, pinned)
+                .map_err(AgentError::TokenBudget),
             None => Ok(request),
         }
     }

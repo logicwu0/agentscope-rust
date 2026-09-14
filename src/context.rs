@@ -5,9 +5,13 @@ use std::{collections::BTreeMap, fmt, num::NonZeroUsize};
 use crate::{ContentBlock, Msg, Role};
 
 mod budget;
+mod summary;
 pub use budget::{
     HeuristicTokenCounter, TokenBudget, TokenBudgetError, TokenCount, TokenCountAccuracy,
     TokenCounter,
+};
+pub use summary::{
+    ChatModelSummarizer, ContextSummarizer, ContextSummary, SummaryError, SummaryFuture,
 };
 
 /// Selects history for each model call without modifying stored messages.

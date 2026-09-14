@@ -345,6 +345,63 @@ are runtime configuration and must be reapplied after rebuilding the agent.
 This is per-request input budgeting, not a cumulative reply/cost limit or automatic
 summarization. Offline example: `cargo run --example token_budget`.
 
+### Explicit history summarization
+
+Configure `ChatModelSummarizer` with a chosen `ChatModel` and its own `TokenBudget`,
+then attach it using `with_summarizer` (or `with_shared_summarizer` for a custom
+asynchronous `ContextSummarizer`). It may use the same model as the agent or a
+separately configured one. Only an explicit call invokes it:
+
+```rust
+let summary = agent.compact_context(3).await?; // keep at least 3 recent user turns
+// Later, discard only the summary, never the raw history:
+agent.clear_context_summary().await?;
+```
+
+Both methods support `dyn Agent`. Compaction returns `Some(ContextSummary)` when
+committed, or `None` without a model call if there is no newly eligible old prefix.
+Only completed old turns with matched terminal tool results are eligible. Active
+operations on the same agent/clones return `Busy`; pending confirmation or uncertain
+execution checkpoints must be resolved first. Do not modify shared memory directly
+or reenter this agent from the summarizer. Separate processes rely on store revisions.
+
+The built-in adapter makes one non-streaming, tool-free model call with the raw
+source encoded as data in one user message. It preserves goals, constraints, facts,
+decisions, tool outcomes and open tasks by instruction, not by guarantee. System
+messages are retained verbatim outside the summary; thinking blocks are not sent
+to the summary model. Multimodal sources are not supported by this adapter. Its
+separate budget cannot truncate source turns; input too large for that budget
+fails without a model call. Empty, truncated or tool-call responses are rejected.
+There is no chunking, automatic trigger or extra retry layer. Model-level retries
+may still apply, and a real summary model costs tokens and can omit or distort facts.
+
+Original messages are never rewritten. `AgentState` **v4** stores a separate summary,
+covered-prefix length and SHA-256 source fingerprint; v1–v3 states without summaries
+remain readable. SQLite state persistence needs no database schema change. Older
+agent versions cannot restore v4 state. Rebuilding an agent restores the summary
+without needing a summarizer, but future compaction requires configuring one again.
+`Memory`/`SQLiteMemory` alone stores raw messages, not the summary; use snapshots or
+`StateStore` for restartable summaries.
+
+Model input contains the configured system prompt, an assistant-role reference
+summary (not a system instruction), retained historical system messages and the
+unsummarized suffix. Context selection still applies to that suffix; the summary
+is separately pinned during token budgeting. Every normal, streamed and recovery
+model call uses the same projection. Modified source prefixes are rejected rather
+than silently using stale summaries. The fingerprint is a consistency check, not
+proof that a model summary is factually correct or that stored data is authentic.
+
+Compaction re-summarizes the eligible original prefix, not the previous summary,
+avoiding repeated summary-of-summary loss. The new projected context must be smaller
+in serialized bytes (not a promise of fewer actual tokens), and must pass the agent's
+configured token budget before installation. Model/validation failures, interruption
+and rejected store writes leave the old summary unchanged. Persisted state is written
+before the runtime summary is replaced; if a store acknowledgement is uncertain,
+reload to discover what committed. Use `clear_context_summary` to return to raw
+context, still subject to the configured context policy and budget.
+
+Offline example with deterministic models: `cargo run --example compaction`.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -402,7 +459,8 @@ after they have been exercised by working examples.
 
 - [x] Model-input `ContextPolicy` and recent-user-turn selection without pruning durable history
 - [x] Per-request input token budgets, output reservation and replaceable token counters
-- [ ] Context summarization and oversized tool-result offload
+- [x] Explicit asynchronous history summaries, separate persistence, validation and rollback
+- [ ] Automatic compaction triggers, chunked summarization and oversized tool-result offload
 - [x] Define an object-safe asynchronous `Memory` trait
 - [x] Define an object-safe asynchronous `Agent` trait
 - [x] Implement thread-safe in-memory conversation history

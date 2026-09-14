@@ -7,7 +7,7 @@ use crate::Msg;
 use super::{PendingToolCalls, PendingToolExecution};
 
 /// The state format version emitted by this crate.
-pub const AGENT_STATE_VERSION: u32 = 3;
+pub const AGENT_STATE_VERSION: u32 = 4;
 
 /// A complete, restartable snapshot of one agent's conversation state.
 ///
@@ -19,6 +19,8 @@ pub struct AgentState {
     format_version: u32,
     agent_name: String,
     messages: Vec<Msg>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_summary: Option<crate::ContextSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_tool_calls: Option<PendingToolCalls>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,6 +35,7 @@ impl AgentState {
             format_version: AGENT_STATE_VERSION,
             agent_name: agent_name.into(),
             messages,
+            context_summary: None,
             pending_tool_calls: None,
             pending_tool_execution: None,
         }
@@ -54,6 +57,17 @@ impl AgentState {
     #[must_use]
     pub fn messages(&self) -> &[Msg] {
         &self.messages
+    }
+
+    /// Returns the separately stored lossy summary of an original history prefix.
+    #[must_use]
+    pub fn context_summary(&self) -> Option<&crate::ContextSummary> {
+        self.context_summary.as_ref()
+    }
+
+    pub(crate) fn with_context_summary(mut self, summary: Option<crate::ContextSummary>) -> Self {
+        self.context_summary = summary;
+        self
     }
 
     /// Returns the tool calls awaiting human confirmation, when paused.
@@ -87,11 +101,13 @@ impl AgentState {
         Vec<Msg>,
         Option<PendingToolCalls>,
         Option<PendingToolExecution>,
+        Option<crate::ContextSummary>,
     ) {
         (
             self.messages,
             self.pending_tool_calls,
             self.pending_tool_execution,
+            self.context_summary,
         )
     }
 }

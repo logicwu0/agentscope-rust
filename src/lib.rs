@@ -17,7 +17,8 @@ pub use agent::{
     StateStoreResult, ToolConfirmation, ToolConfirmationDecision,
 };
 pub use context::{
-    ContextPolicy, FullContext, HeuristicTokenCounter, RecentTurns, TokenBudget, TokenBudgetError,
+    ChatModelSummarizer, ContextPolicy, ContextSummarizer, ContextSummary, FullContext,
+    HeuristicTokenCounter, RecentTurns, SummaryError, SummaryFuture, TokenBudget, TokenBudgetError,
     TokenCount, TokenCountAccuracy, TokenCounter, ZeroContextTurns,
 };
 #[cfg(feature = "sqlite")]

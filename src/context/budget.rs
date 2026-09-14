@@ -166,7 +166,15 @@ impl TokenBudget {
     /// Returns a counter error, invalid output limit, or [`TokenBudgetError::Exceeded`]
     /// if the protected content alone is too large. Estimated counts do not
     /// guarantee that the provider will accept the resulting context length.
-    pub fn apply(&self, mut request: ChatRequest) -> Result<ChatRequest, TokenBudgetError> {
+    pub fn apply(&self, request: ChatRequest) -> Result<ChatRequest, TokenBudgetError> {
+        self.apply_with_pinned_prefix(request, 0)
+    }
+
+    pub(crate) fn apply_with_pinned_prefix(
+        &self,
+        mut request: ChatRequest,
+        pinned: usize,
+    ) -> Result<ChatRequest, TokenBudgetError> {
         let output = request.options.max_tokens.unwrap_or(self.reserved_output);
         if output == 0 || output > self.reserved_output {
             return Err(TokenBudgetError::InvalidOutputLimit {
@@ -179,15 +187,22 @@ impl TokenBudget {
         if count.tokens <= self.input_limit() {
             return Ok(request);
         }
-        let history = request.messages.clone();
+        let prefix = request.messages[..pinned].to_vec();
+        let history = request.messages[pinned..].to_vec();
         let turns = history
             .iter()
             .filter(|message| message.role == Role::User)
             .count();
         for keep in (1..turns).rev() {
-            let selected = RecentTurns::new(keep)
-                .map_err(|_| TokenBudgetError::InvalidConfiguration)?
-                .select_messages(&history);
+            let selected = prefix
+                .iter()
+                .cloned()
+                .chain(
+                    RecentTurns::new(keep)
+                        .map_err(|_| TokenBudgetError::InvalidConfiguration)?
+                        .select_messages(&history),
+                )
+                .collect::<Vec<_>>();
             if selected == request.messages {
                 continue;
             }
