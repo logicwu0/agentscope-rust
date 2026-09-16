@@ -39,6 +39,9 @@ impl ReActAgent {
     /// stream through its terminal event for its final state to be saved.
     #[must_use]
     pub fn stream(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
+        if self.auto_compaction.is_some() {
+            return self.auto_stream(message);
+        }
         Box::pin(async move {
             let operation = self.begin_state_operation().await?;
             let events = match self.stream_without_state_store(message).await {
@@ -48,32 +51,40 @@ impl ReActAgent {
                     return Err(error);
                 }
             };
-            let Some(operation) = operation else {
-                return Ok(events);
-            };
-            Ok(Box::pin(stream! {
-                let mut events = events;
-                let mut operation = Some(operation);
-                while let Some(event) = events.next().await {
-                    let terminal = event.as_ref().map_or(true, |event| matches!(
-                        event,
-                        AgentEvent::Finished { .. }
-                            | AgentEvent::ToolConfirmationRequired { .. }
-                            | AgentEvent::Error { .. }
-                    ));
-                    if terminal {
-                        match self.finish_state_operation(operation.take()).await {
-                            Ok(()) => yield event,
-                            Err(error) => yield Ok(AgentEvent::Error { step: None, error }),
-                        }
-                        return;
+            Ok(self.finish_reply_stream(events, operation))
+        })
+    }
+
+    pub(super) fn finish_reply_stream<'a>(
+        &'a self,
+        events: AgentEventStream<'a>,
+        operation: Option<super::StateOperation>,
+    ) -> AgentEventStream<'a> {
+        let Some(operation) = operation else {
+            return events;
+        };
+        Box::pin(stream! {
+            let mut events = events;
+            let mut operation = Some(operation);
+            while let Some(event) = events.next().await {
+                let terminal = event.as_ref().map_or(true, |event| matches!(
+                    event,
+                    AgentEvent::Finished { .. }
+                        | AgentEvent::ToolConfirmationRequired { .. }
+                        | AgentEvent::Error { .. }
+                ));
+                if terminal {
+                    match self.finish_state_operation(operation.take()).await {
+                        Ok(()) => yield event,
+                        Err(error) => yield Ok(AgentEvent::Error { step: None, error }),
                     }
-                    yield event;
+                    return;
                 }
-                if let Err(error) = self.finish_state_operation(operation).await {
-                    yield Ok(AgentEvent::Error { step: None, error });
-                }
-            }) as AgentEventStream<'_>)
+                yield event;
+            }
+            if let Err(error) = self.finish_state_operation(operation).await {
+                yield Ok(AgentEvent::Error { step: None, error });
+            }
         })
     }
 

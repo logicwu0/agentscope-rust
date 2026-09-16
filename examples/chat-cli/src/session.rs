@@ -141,6 +141,15 @@ impl Session {
                     io::stdout().flush()?;
                 }
                 AgentEvent::ToolConfirmationRequired { .. } => paused = true,
+                AgentEvent::ContextCompactionStarted { .. } => {
+                    println!("\n[context compression started]");
+                }
+                AgentEvent::ContextCompactionCompleted { covered_messages } => println!(
+                    "[context compression completed] {covered_messages} messages summarized"
+                ),
+                AgentEvent::ContextCompactionFailed { .. } => {
+                    println!("[context compression failed] original state retained");
+                }
                 AgentEvent::ToolStarted { call, .. } => {
                     println!("\n[tool started] {} {}", call.name(), call.input());
                 }

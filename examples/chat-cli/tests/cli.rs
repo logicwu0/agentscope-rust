@@ -7,9 +7,14 @@ use std::{
 };
 
 fn run(db: &Path, session: &str, input: &str) -> String {
+    run_options(db, session, input, &[])
+}
+
+fn run_options(db: &Path, session: &str, input: &str, options: &[&str]) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_agentscope-chat"))
         .args(["--offline", "--session", session, "--db"])
         .arg(db)
+        .args(options)
         .env_remove("DEEPSEEK_API_KEY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -34,6 +39,45 @@ fn run(db: &Path, session: &str, input: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn optional_auto_compaction_emits_events_and_preserves_database_history() {
+    use agentscope::{AgentState, Msg};
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("auto.db");
+    let store = SQLiteStateStore::open(&db).await.unwrap();
+    let key = StateKey::new("local", "auto").unwrap();
+    let history = vec![
+        Msg::user("long old question ".repeat(400)),
+        Msg::assistant("chat", "long old answer ".repeat(400)),
+        Msg::user("recent"),
+        Msg::assistant("chat", "answer"),
+    ];
+    store
+        .save(key.clone(), None, AgentState::new("chat", history.clone()))
+        .await
+        .unwrap();
+    let output = run_options(
+        &db,
+        "auto",
+        "new question\n/quit\n",
+        &[
+            "--auto-compact",
+            "1",
+            "--context-window",
+            "2000",
+            "--output-reserve",
+            "200",
+        ],
+    );
+    assert!(output.contains("[context compression started]"));
+    assert!(output.contains("[context compression completed]"));
+    assert!(output.contains("new question"));
+    let saved = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(&saved.state().messages()[..4], history);
+    assert!(saved.state().context_summary().is_some());
+    assert_eq!(saved.state().messages().len(), 6);
 }
 
 #[tokio::test]

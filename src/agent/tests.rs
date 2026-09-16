@@ -13,6 +13,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use tokio::sync::Barrier;
 
+mod auto_compaction;
 mod compaction;
 mod context;
 mod recovery_stream;

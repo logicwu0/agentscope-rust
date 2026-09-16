@@ -37,6 +37,19 @@ impl Tool for Multiply {
 
 pub struct OfflineModel;
 
+/// A deterministic lifecycle demo, not semantic summarization.
+pub struct OfflineSummarizer;
+impl agentscope::ContextSummarizer for OfflineSummarizer {
+    fn summarize<'a>(&'a self, messages: &'a [Msg]) -> agentscope::SummaryFuture<'a> {
+        Box::pin(async move {
+            Ok(format!(
+                "Offline placeholder for {} original messages. This mock does not preserve their facts.",
+                messages.len()
+            ))
+        })
+    }
+}
+
 impl OfflineModel {
     fn response(request: &ChatRequest) -> ChatResponse {
         let last = request.messages.last();

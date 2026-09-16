@@ -175,15 +175,7 @@ impl TokenBudget {
         mut request: ChatRequest,
         pinned: usize,
     ) -> Result<ChatRequest, TokenBudgetError> {
-        let output = request.options.max_tokens.unwrap_or(self.reserved_output);
-        if output == 0 || output > self.reserved_output {
-            return Err(TokenBudgetError::InvalidOutputLimit {
-                requested: output,
-                reserved: self.reserved_output,
-            });
-        }
-        request.options.max_tokens = Some(output);
-        let mut count = self.counter.count(&request)?;
+        let mut count = self.prepare_count(&mut request)?;
         if count.tokens <= self.input_limit() {
             return Ok(request);
         }
@@ -212,11 +204,39 @@ impl TokenBudget {
                 return Ok(request);
             }
         }
-        Err(TokenBudgetError::Exceeded {
+        Err(self.exceeded(count))
+    }
+
+    /// Checks input without silently removing history, for automatic compaction.
+    pub(crate) fn check_without_trimming(
+        &self,
+        mut request: ChatRequest,
+    ) -> Result<(), TokenBudgetError> {
+        let count = self.prepare_count(&mut request)?;
+        if count.tokens > self.input_limit() {
+            return Err(self.exceeded(count));
+        }
+        Ok(())
+    }
+
+    fn prepare_count(&self, request: &mut ChatRequest) -> Result<TokenCount, TokenBudgetError> {
+        let output = request.options.max_tokens.unwrap_or(self.reserved_output);
+        if output == 0 || output > self.reserved_output {
+            return Err(TokenBudgetError::InvalidOutputLimit {
+                requested: output,
+                reserved: self.reserved_output,
+            });
+        }
+        request.options.max_tokens = Some(output);
+        self.counter.count(request)
+    }
+
+    fn exceeded(&self, count: TokenCount) -> TokenBudgetError {
+        TokenBudgetError::Exceeded {
             input: count,
             input_limit: self.input_limit(),
             reserved_output: self.reserved_output,
-        })
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 //! Minimal non-streaming `ReAct` agent loop.
 
+mod auto_compaction;
 mod compaction;
 mod recovery_stream;
 mod streaming;
@@ -53,6 +54,8 @@ pub struct ReActAgent {
     context_summary: Arc<Mutex<Option<crate::ContextSummary>>>,
     summarizer: Option<Arc<dyn crate::ContextSummarizer>>,
     context_operations: Arc<RwLock<()>>,
+    auto_compaction: Option<usize>,
+    tool_result_offload: Option<crate::ToolResultOffload>,
 }
 
 struct StateBinding {
@@ -66,6 +69,7 @@ struct StateOperation {
     expected_revision: Option<u64>,
     _guard: Option<OwnedMutexGuard<()>>,
     context_guard: Option<OwnedRwLockReadGuard<()>>,
+    auto_guard: Option<tokio::sync::OwnedRwLockWriteGuard<()>>,
 }
 
 impl ReActAgent {
@@ -114,6 +118,8 @@ impl ReActAgent {
             context_summary: Arc::new(Mutex::new(None)),
             summarizer: None,
             context_operations: Arc::new(RwLock::new(())),
+            auto_compaction: None,
+            tool_result_offload: None,
         })
     }
 
@@ -313,6 +319,9 @@ impl ReActAgent {
     /// Produces one reply using a `ReAct` conversation.
     #[must_use]
     pub fn reply(&self, message: Msg) -> AgentFuture<'_, Msg> {
+        if self.auto_compaction.is_some() {
+            return self.auto_reply(message);
+        }
         Box::pin(async move {
             let operation = self.begin_state_operation().await?;
             let result = self.reply_without_state_store(message).await;
@@ -731,6 +740,7 @@ impl ReActAgent {
                 expected_revision: None,
                 _guard: None,
                 context_guard: None,
+                auto_guard: None,
             });
         };
         let memory = self
@@ -754,6 +764,7 @@ impl ReActAgent {
             expected_revision,
             _guard: Some(guard),
             context_guard: None,
+            auto_guard: None,
         })
     }
 
@@ -1049,6 +1060,27 @@ impl Agent for ReActAgent {
 }
 
 impl ReActAgent {
+    /// Enables large text result projection and registers `read_offloaded_text`.
+    /// Raw memory, events, checkpoints and idempotency records are unchanged.
+    /// Use a store isolated to this session; restore with the same store/config.
+    /// # Errors
+    /// Rejects a reader name collision or invalid tool registration.
+    pub fn with_tool_result_offload(
+        mut self,
+        config: crate::ToolResultOffload,
+    ) -> AgentResult<Self> {
+        let mut registry = crate::ToolRegistry::new();
+        for definition in self.tools.registry().definitions() {
+            if let Some(tool) = self.tools.registry().get(&definition.name) {
+                registry.register_shared(tool)?;
+            }
+        }
+        registry.register(config.reader()?)?;
+        self.tools = ToolExecutor::new(registry).with_mode(self.tools.mode());
+        self.tool_result_offload = Some(config);
+        Ok(self)
+    }
+
     async fn prepare_model_request(
         &self,
         history: &[Msg],
@@ -1057,7 +1089,7 @@ impl ReActAgent {
         interrupt: &super::interrupt::AgentInterruptToken,
     ) -> AgentResult<ChatRequest> {
         ensure_not_interrupted(interrupt)?;
-        let request = self.chat_request(history, system_prompt)?;
+        let request = self.chat_request(history, system_prompt).await?;
         self.notify_hooks(&AgentHookEvent::BeforeModelCall {
             step,
             request: request.clone(),
@@ -1068,40 +1100,60 @@ impl ReActAgent {
     }
 
     // All normal and recovery loops use the same model-input assembly.
-    fn chat_request(
+    async fn chat_request(
         &self,
         history: &[Msg],
         system_prompt: Option<&Msg>,
     ) -> AgentResult<ChatRequest> {
         let summary = lock(&self.context_summary).clone();
         self.chat_request_with_summary(history, system_prompt, summary.as_ref())
+            .await
     }
 
-    fn chat_request_with_summary(
+    async fn chat_request_with_summary(
         &self,
         history: &[Msg],
         system_prompt: Option<&Msg>,
         summary: Option<&crate::ContextSummary>,
     ) -> AgentResult<ChatRequest> {
-        let projected = Self::summary_projection(history, summary)?;
-        let mut prefix = system_prompt.into_iter().cloned().collect::<Vec<_>>();
-        if let Some(summary) = summary {
-            prefix.push(summary.message());
-        }
-        let pinned = prefix.len();
-        let request = ChatRequest::new(
-            prefix
-                .into_iter()
-                .chain(self.context_policy.select_messages(&projected)),
-        )
-        .with_options(self.options.clone())
-        .with_tools(self.tools.registry().definitions());
+        let (request, pinned) = self
+            .unbudgeted_request(history, system_prompt, summary)
+            .await?;
         match &self.token_budget {
             Some(budget) => budget
                 .apply_with_pinned_prefix(request, pinned)
                 .map_err(AgentError::TokenBudget),
             None => Ok(request),
         }
+    }
+
+    async fn unbudgeted_request(
+        &self,
+        history: &[Msg],
+        system_prompt: Option<&Msg>,
+        summary: Option<&crate::ContextSummary>,
+    ) -> AgentResult<(ChatRequest, usize)> {
+        let projected = Self::summary_projection(history, summary)?;
+        let mut prefix = system_prompt.into_iter().cloned().collect::<Vec<_>>();
+        if let Some(summary) = summary {
+            prefix.push(summary.message());
+        }
+        let pinned = prefix.len();
+        let mut request = ChatRequest::new(
+            prefix
+                .into_iter()
+                .chain(self.context_policy.select_messages(&projected)),
+        )
+        .with_options(self.options.clone())
+        .with_tools(self.tools.registry().definitions());
+        if let Some(offload) = &self.tool_result_offload {
+            let mut interrupt = self.interrupt.token();
+            tokio::select! {
+                () = interrupt.cancelled() => return Err(AgentError::Interrupted),
+                result = offload.project(&mut request.messages) => result?,
+            }
+        }
+        Ok((request, pinned))
     }
 }
 

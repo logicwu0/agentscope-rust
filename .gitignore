@@ -9,3 +9,4 @@ Cargo.lock
 .env.*
 /agentscope-chat.db
 /agentscope-chat.db-*
+/.agentscope-offload/

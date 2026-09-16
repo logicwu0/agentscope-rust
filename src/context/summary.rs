@@ -218,6 +218,8 @@ impl ContextSummarizer for ChatModelSummarizer {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum SummaryError {
+    /// Automatic compaction requires an explicit agent token budget.
+    AutoRequiresBudget,
     /// No explicit summarizer was configured.
     NotConfigured,
     /// At least one recent user turn must remain verbatim.

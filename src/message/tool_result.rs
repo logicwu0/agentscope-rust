@@ -213,6 +213,13 @@ impl ToolResultBlock {
         &self.output
     }
 
+    /// Replaces output while preserving identity, state, metadata and timestamps.
+    #[must_use]
+    pub fn with_output(mut self, output: impl Into<ToolResultOutput>) -> Self {
+        self.output = output.into();
+        self
+    }
+
     /// Returns the current execution state.
     #[must_use]
     pub const fn state(&self) -> ToolResultState {

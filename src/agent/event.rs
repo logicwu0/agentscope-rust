@@ -17,6 +17,21 @@ use super::PendingToolCalls;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// Automatic pre-reply compaction is being attempted (not a model step).
+    ContextCompactionStarted {
+        /// Number of existing recent turns retained, in addition to the new input.
+        keep_recent_turns: usize,
+    },
+    /// A validated summary was committed before the main reply began.
+    ContextCompactionCompleted {
+        /// Number of original messages covered by the committed summary.
+        covered_messages: usize,
+    },
+    /// Automatic compaction failed; a terminal `Error` follows.
+    ContextCompactionFailed {
+        /// Why no new summary was committed.
+        error: AgentError,
+    },
     /// Incremental plain-text model content.
     TextDelta {
         /// The one-based model-call number.

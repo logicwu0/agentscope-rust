@@ -297,8 +297,8 @@ state; reconfigure them when rebuilding an agent. Implement the synchronous
 and tool-call/result pairs without performing I/O. Use
 `with_shared_context_policy` to attach a shared policy.
 
-Automatic summaries, retrieval, and oversized-result offload are not included
-yet. Run `cargo run --example context` offline: the final model
+Retrieval is not included yet. Summarization and oversized text-result offload are
+separate opt-in capabilities described below. Run `cargo run --example context` offline: the final model
 input contains 2 messages while the snapshot retains all 6 history messages.
 
 ### Per-request token budgets
@@ -350,7 +350,8 @@ summarization. Offline example: `cargo run --example token_budget`.
 Configure `ChatModelSummarizer` with a chosen `ChatModel` and its own `TokenBudget`,
 then attach it using `with_summarizer` (or `with_shared_summarizer` for a custom
 asynchronous `ContextSummarizer`). It may use the same model as the agent or a
-separately configured one. Only an explicit call invokes it:
+separately configured one. Unless automatic compaction is explicitly enabled,
+only an explicit call invokes it:
 
 ```rust
 let summary = agent.compact_context(3).await?; // keep at least 3 recent user turns
@@ -372,7 +373,7 @@ messages are retained verbatim outside the summary; thinking blocks are not sent
 to the summary model. Multimodal sources are not supported by this adapter. Its
 separate budget cannot truncate source turns; input too large for that budget
 fails without a model call. Empty, truncated or tool-call responses are rejected.
-There is no chunking, automatic trigger or extra retry layer. Model-level retries
+This adapter adds no chunking or extra retry layer. Model-level retries
 may still apply, and a real summary model costs tokens and can omit or distort facts.
 
 Original messages are never rewritten. `AgentState` **v4** stores a separate summary,
@@ -401,6 +402,103 @@ reload to discover what committed. Use `clear_context_summary` to return to raw
 context, still subject to the configured context policy and budget.
 
 Offline example with deterministic models: `cargo run --example compaction`.
+
+### Opt-in automatic compaction before new replies
+
+After configuring memory, a summarizer, and the agent's `TokenBudget`, explicitly
+enable `agent.with_auto_compaction(1)?`. Use `without_auto_compaction()` to disable
+it without deleting summaries. Configuration is runtime-only and defaults to OFF.
+Enabling it authorizes extra summary-model calls and their cost. The setting keeps
+at least N **existing** recent user turns, in addition to the incoming message;
+it never summarizes that new input. This conservative first version may reject a
+request even if summarizing more recent material would make it fit.
+
+Before each new `reply`/`stream`, the agent checks projected history plus the incoming
+message, after `ContextPolicy` but **before** the budget silently drops old turns.
+If it fits, no summarizer is called. Only input overflow triggers one attempt.
+Missing configuration, unsupported content and other counter errors fail directly.
+The candidate summary must fit with the selected recent context and incoming message
+without further budget truncation; otherwise the operation fails instead of retrying
+or falling back to silently dropping history. No eligible prefix also fails without
+a summary-model call. Model-level retries remain the model's responsibility.
+
+Streams emit `ContextCompactionStarted`, then `ContextCompactionCompleted` on commit
+or `ContextCompactionFailed` followed by terminal `Error`. These are pre-model events,
+not ReAct steps; `Completed` is emitted only after the summary is durably saved when
+a store is bound. Validation errors before an attempt emit only terminal `Error`.
+The non-streaming interface returns the result/error without an event stream.
+Preflight failure/cancellation preserves the previous summary and does not append
+the incoming message. Dropping after `Completed` retains the committed summary but
+not the incoming message until polling continues. A later main-model failure does
+not undo a successfully committed summary. Uncertain store acknowledgements still
+require reloading state to determine what committed.
+
+Each new reply can attempt compaction at most once. Intermediate tool steps and all
+confirmation/retry/external-result continuations retain their existing budgeting
+behavior and never trigger auto compaction. Pending checkpoints reject new replies
+as before. Auto-enabled new replies serialize with operations on the same agent's
+clones; don't reenter the same agent from its hooks/models/summarizer. Store revision
+checks are still required across independent instances/processes.
+
+Offline SDK demo: `cargo run --example auto_compaction`.
+CLI opt-in (example limits, not detected model capabilities):
+
+```shell
+cargo run -p agentscope-chat -- --auto-compact 1 --context-window 8192 --output-reserve 1024
+```
+
+The CLI shows compaction events and uses the same DeepSeek model for summaries, with
+a summary input/output window twice the configured context window and the same output
+reservation. Without `--auto-compact`, no auto budget/summary configuration is applied.
+With `--offline`, it uses an explicitly labelled placeholder summarizer that tests
+the lifecycle but does **not** preserve semantic facts. The estimated counter and
+lossy-summary limitations above still apply. No new state-format change is needed.
+
+### Optional large tool-text offload and bounded reads
+
+Core defines `OffloadStore`; the `agentscope-offload-file` plugin implements local
+files. This is OFF by default. `with_tool_result_offload` enables projection and
+registers `read_offloaded_text`, rejecting an existing tool with that name:
+
+```rust
+let store = std::sync::Arc::new(
+    agentscope_offload_file::FileOffloadStore::new(".agentscope-offload/session-123")?
+);
+let agent = agent.with_tool_result_offload(
+    agentscope::ToolResultOffload::new(store, 8192, 512, 2048)?
+)?;
+```
+
+Limits are UTF-8 bytes: threshold, maximum preview, maximum read page. Successful
+`ToolResultOutput::Text` above the threshold is durably stored before the model
+receives a JSON reference containing ID, length, preview and reader details. The
+serialized reference stays within the threshold, including escaping. Read with
+`id`, `offset`, `max_bytes`; continue at `next_offset` until `eof`. Offsets must be
+character boundaries; read limits must be at least four bytes. Read-page JSON
+wrapping/escaping adds overhead, so keep a `TokenBudget`; offload does not guarantee
+that every request fits its window.
+
+Projection runs after summary/history selection and before budget checks, through
+the common normal, streaming and recovery request path. Read pages are not
+recursively offloaded. Raw memory, events, checkpoints and idempotency results are
+unchanged, as are call IDs, result states and timestamps. Storage failures stop
+the model request, without turning a completed tool into a failed execution or
+automatically rerunning it. Summarizers still receive original history and retain
+their independent input budget.
+
+The file plugin uses content hashes, temporary files, no-clobber publication and
+file/directory sync. Reads are bounded, not whole-file loads. Blocking file I/O
+runs in the blocking thread pool; cancellation may leave an unused durable blob.
+Use a private per-session directory and restore with the same directory/config.
+Sharing directories shares reader access. The directory and all ancestors must
+be trusted: this is not a filesystem sandbox and IDs are not user authentication.
+Only content IDs are accepted, never arbitrary paths; symlink files are rejected.
+Files contain unencrypted original content. Never publish them. The repository
+ignores `/.agentscope-offload/`; ignore custom locations yourself.
+
+V1 excludes block/multimodal, error and unfinished results, automatic retention,
+quotas and chunked summarization. It does not reduce raw state storage or memory.
+Offline SDK demo: `cargo run -p agentscope-offload-file --example offload`.
 
 ## Roadmap / TODO
 
@@ -460,7 +558,9 @@ after they have been exercised by working examples.
 - [x] Model-input `ContextPolicy` and recent-user-turn selection without pruning durable history
 - [x] Per-request input token budgets, output reservation and replaceable token counters
 - [x] Explicit asynchronous history summaries, separate persistence, validation and rollback
-- [ ] Automatic compaction triggers, chunked summarization and oversized tool-result offload
+- [x] Opt-in once-per-new-reply automatic compaction with streaming lifecycle events
+- [x] Opt-in large raw-text tool-result offload, local file plugin and bounded reads
+- [ ] Chunked summarization, multimodal offload and blob quotas/retention
 - [x] Define an object-safe asynchronous `Memory` trait
 - [x] Define an object-safe asynchronous `Agent` trait
 - [x] Implement thread-safe in-memory conversation history

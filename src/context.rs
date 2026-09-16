@@ -5,11 +5,13 @@ use std::{collections::BTreeMap, fmt, num::NonZeroUsize};
 use crate::{ContentBlock, Msg, Role};
 
 mod budget;
+mod offload;
 mod summary;
 pub use budget::{
     HeuristicTokenCounter, TokenBudget, TokenBudgetError, TokenCount, TokenCountAccuracy,
     TokenCounter,
 };
+pub use offload::{OffloadStore, OffloadedTextChunk, ToolResultOffload};
 pub use summary::{
     ChatModelSummarizer, ContextSummarizer, ContextSummary, SummaryError, SummaryFuture,
 };
@@ -131,5 +133,7 @@ impl fmt::Display for ZeroContextTurns {
 
 impl std::error::Error for ZeroContextTurns {}
 
+#[cfg(test)]
+mod offload_tests;
 #[cfg(test)]
 mod tests;
