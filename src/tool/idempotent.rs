@@ -116,7 +116,7 @@ impl Tool for IdempotentTool {
             match &*state {
                 ExecutionState::Completed(result) => return result.clone(),
                 ExecutionState::Uncertain => return Err(ToolError::new(
-                    "previous invocation was cancelled or panicked; reconcile its external outcome",
+                    "previous invocation has an uncertain outcome; reconcile its external effects",
                 )
                 .with_code("idempotency_in_doubt")),
                 ExecutionState::Ready => {}
@@ -124,6 +124,9 @@ impl Tool for IdempotentTool {
             // Dropping the future releases the mutex but retains this marker.
             *state = ExecutionState::Uncertain;
             let result = self.inner.execute(input, context).await;
+            if result.as_ref().is_err_and(ToolError::is_in_doubt) {
+                return result;
+            }
             *state = ExecutionState::Completed(result.clone());
             result
         })

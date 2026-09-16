@@ -11,6 +11,41 @@ fn definition() -> ToolDefinition {
     ToolDefinition::new("write", "Write a value", json!({"type":"object"})).unwrap()
 }
 
+#[tokio::test]
+async fn reported_unknown_tool_outcome_keeps_claim_unresolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        SQLiteIdempotencyStore::open(dir.path().join("unknown.db"))
+            .await
+            .unwrap(),
+    );
+    let inner =
+        Arc::new(MockTool::new(definition()).with_error(ToolError::in_doubt("remote timeout")));
+    let tool =
+        PersistentIdempotentTool::from_shared("tenant", inner.clone(), store.clone()).unwrap();
+    let ctx = context("key");
+    assert!(
+        tool.execute(json!({"a":1}), ctx.clone())
+            .await
+            .unwrap_err()
+            .is_in_doubt()
+    );
+    assert!(matches!(
+        store
+            .claim(IdempotencyRequest::new("tenant", "write", json!({"a":1}), ctx.clone()).unwrap())
+            .await
+            .unwrap(),
+        IdempotencyClaim::InDoubt
+    ));
+    assert!(
+        tool.execute(json!({"a":1}), ctx)
+            .await
+            .unwrap_err()
+            .is_in_doubt()
+    );
+    assert_eq!(inner.recorded_invocations().len(), 1);
+}
+
 fn context(key: &str) -> ToolContext {
     ToolContext::new().with_idempotency_key(key)
 }

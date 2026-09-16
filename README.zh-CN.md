@@ -411,6 +411,29 @@ let agent = agent.with_tool_result_offload(
 cargo run -p agentscope-offload-file --example offload
 ```
 
+### 本地 MCP 工具插件（可选）
+
+独立的 `agentscope-mcp` 插件默认不启动程序。通过 `StdioConfig` 明确配置可信程序、
+参数和必要环境变量，`McpClient::connect(config).await?` 完成握手，
+`client.registry("local").await?` 生成可传给 `ToolExecutor` 的注册表。
+工具名为 `local__原名`，沿用确认、流式恢复、幂等包装及大文本结果卸载。
+
+第一版支持协议 `2025-11-25` / `2025-06-18` 的初始化、分页发现、工具调用和 ping，
+保留文本/结构化 JSON，校验输入/输出 Schema；不支持的多模态结果显式报错。
+同一连接串行调度，有请求时限和帧大小限制。默认不继承环境变量，不转发
+`ToolContext` 元数据或幂等键，Server 注解不会自动授予权限。
+
+超时、断连或取消后关闭连接，不自动重连或重试；副作用可能已发生，经过确认的
+调用保留“不确定执行”检查点，幂等包装也不会将其缓存为已完成失败。
+先核对外部结果再决定恢复，MCP 不保证相同幂等键重试安全。
+`close()` 关闭 stdin、等待退出，必要时强制终止直属子进程，不管理整个进程树。
+启动 Server 本身就会执行代码，必须信任并授权；本插件不是沙箱。
+
+HTTP/OAuth、动态刷新、资源/提示词和多模态映射留在 TODO；不宣称完整协议兼容。
+配置及边界见[插件说明](plugins/agentscope-mcp/README.md)。离线示例（macOS/Linux，
+需 `/usr/bin/python3`，无需第三方 Python 包）：
+`cargo run -p agentscope-mcp --example stdio`。
+
 ## 路线图 / TODO
 
 项目将采用渐进式开发。只有经过可运行示例验证的接口，才会逐步进入稳定状态。
@@ -504,7 +527,8 @@ cargo run -p agentscope-offload-file --example offload
 
 ### 里程碑 5——互操作
 
-- [ ] 实现 MCP Client
+- [x] 独立 MCP Client 插件：本地 stdio、工具发现与调用
+- [ ] MCP HTTP/OAuth、动态刷新、资源/提示词与多模态结果映射
 - [ ] 评估 MCP Server 支持
 - [ ] 添加 A2A 互操作能力
 - [ ] 添加 OpenTelemetry 链路追踪

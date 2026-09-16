@@ -198,10 +198,7 @@ impl Tool for PersistentIdempotentTool {
                 IdempotencyClaim::InDoubt => return Err(in_doubt()),
             };
             let result = self.inner.execute(input, context).await;
-            if result
-                .as_ref()
-                .is_err_and(|error| error.code.as_deref() == Some("idempotency_in_doubt"))
-            {
+            if result.as_ref().is_err_and(ToolError::is_in_doubt) {
                 return result;
             }
             self.store

@@ -695,12 +695,14 @@ impl ReActAgent {
             .map_err(AgentError::Tool),
         }?;
         if results.iter().any(|result| {
-            result
-                .metadata
-                .get("error")
-                .and_then(|error| error.get("code"))
-                .and_then(serde_json::Value::as_str)
-                == Some("idempotency_in_doubt")
+            matches!(
+                result
+                    .metadata
+                    .get("error")
+                    .and_then(|error| error.get("code"))
+                    .and_then(serde_json::Value::as_str),
+                Some("idempotency_in_doubt" | "tool_execution_in_doubt")
+            )
         }) {
             if let Some(checkpoint) = execution {
                 return Err(AgentError::ToolExecutionInDoubt {

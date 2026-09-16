@@ -72,6 +72,24 @@ pub struct ToolError {
 }
 
 impl ToolError {
+    /// Reports a dispatched tool whose effects cannot be determined. Confirmed
+    /// agent executions retain their recovery checkpoint for this error code.
+    /// This must never be treated as permission to automatically retry.
+    #[must_use]
+    pub fn in_doubt(message: impl Into<String>) -> Self {
+        Self::new(message).with_code("tool_execution_in_doubt")
+    }
+
+    /// Whether effects require external reconciliation rather than being cached
+    /// as a definitive failure. Includes uncertain idempotency-store operations.
+    #[must_use]
+    pub fn is_in_doubt(&self) -> bool {
+        matches!(
+            self.code.as_deref(),
+            Some("tool_execution_in_doubt" | "idempotency_in_doubt")
+        )
+    }
+
     /// Creates a non-retryable tool error.
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {

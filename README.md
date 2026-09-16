@@ -500,6 +500,32 @@ V1 excludes block/multimodal, error and unfinished results, automatic retention,
 quotas and chunked summarization. It does not reduce raw state storage or memory.
 Offline SDK demo: `cargo run -p agentscope-offload-file --example offload`.
 
+### Optional local MCP tool plugin
+
+`agentscope-mcp` is an independent stdio tools client, OFF by default. Configure a
+trusted executable, args and explicit environment in `StdioConfig`, connect via
+`McpClient::connect(config).await?`, then pass `client.registry("local").await?`
+to `ToolExecutor`. Namespaced tools (`local__remote_name`) use existing
+confirmation, streaming recovery, idempotency wrappers and large-text offload.
+
+V1 covers protocol `2025-11-25` / `2025-06-18` initialize, paginated discovery,
+tools/call and ping. Text/structured JSON results and input/output schema checks
+are supported; unsupported content is an explicit error. Calls are serialized and
+bounded by request time/frame size. No inherited environment or ToolContext
+metadata forwarding; server annotations never grant permissions.
+
+Timeout/disconnect/cancellation closes the connection without retries/reconnect.
+Effects may have happened: confirmed calls retain uncertain checkpoints and
+idempotency wrappers leave uncertain records unresolved. Reconcile externally
+before retrying. Generic MCP servers do not guarantee idempotency. `close()` closes
+stdin, waits, then kills the direct child if needed, not arbitrary process trees.
+Launching a server already executes application-privileged code: this is no sandbox.
+
+HTTP/OAuth, dynamic refresh, resources/prompts and multimodal mapping remain TODO.
+This is a tools subset, not a full conformance claim. See the
+[plugin README](plugins/agentscope-mcp/README.md). Offline demo on macOS/Linux with
+`/usr/bin/python3`, no Python packages: `cargo run -p agentscope-mcp --example stdio`.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -594,7 +620,8 @@ after they have been exercised by working examples.
 
 ### Milestone 5 — Interoperability
 
-- [ ] Implement an MCP client
+- [x] Independent MCP client plugin: local stdio, tool discovery and invocation
+- [ ] MCP HTTP/OAuth, dynamic refresh, resources/prompts and multimodal mapping
 - [ ] Evaluate MCP server support
 - [ ] Add A2A interoperability
 - [ ] Add OpenTelemetry tracing

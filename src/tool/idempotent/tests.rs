@@ -15,6 +15,27 @@ fn definition() -> ToolDefinition {
 }
 
 #[test]
+fn reported_unknown_execution_remains_uncertain() {
+    let inner =
+        Arc::new(MockTool::new(definition()).with_error(ToolError::in_doubt("disconnected")));
+    let tool = IdempotentTool::from_shared(inner.clone());
+    let context = ToolContext::new().with_idempotency_key("unknown");
+    assert!(
+        block_on(tool.execute(json!({}), context.clone()))
+            .unwrap_err()
+            .is_in_doubt()
+    );
+    assert_eq!(
+        block_on(tool.execute(json!({}), context))
+            .unwrap_err()
+            .code
+            .as_deref(),
+        Some("idempotency_in_doubt")
+    );
+    assert_eq!(inner.recorded_invocations().len(), 1);
+}
+
+#[test]
 fn duplicate_reuses_output_and_rejects_conflicting_input_and_context() {
     let inner = Arc::new(MockTool::new(definition()).with_output("saved"));
     let tool = IdempotentTool::from_shared(inner.clone());
