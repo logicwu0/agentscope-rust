@@ -7,7 +7,13 @@ pub mod context;
 pub mod memory;
 pub mod message;
 pub mod model;
+pub mod pipeline;
 pub mod tool;
+
+pub use pipeline::{
+    PipelineConfigError, PipelineError, PipelineFailure, PipelineFuture, PipelineOutput,
+    PipelineStep, SequentialPipeline,
+};
 
 pub use agent::{
     AGENT_STATE_VERSION, Agent, AgentError, AgentEvent, AgentEventStream, AgentFuture, AgentHook,

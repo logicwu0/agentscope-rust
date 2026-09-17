@@ -526,6 +526,53 @@ This is a tools subset, not a full conformance claim. See the
 [plugin README](plugins/agentscope-mcp/README.md). Offline demo on macOS/Linux with
 `/usr/bin/python3`, no Python packages: `cargo run -p agentscope-mcp --example stdio`.
 
+### Minimal sequential multi-agent pipeline
+
+`SequentialPipeline` calls a fixed list of `Arc<dyn Agent>` in order, e.g. writer
+then reviewer:
+
+```rust
+let pipeline = agentscope::SequentialPipeline::new(vec![
+    std::sync::Arc::new(writer),
+    std::sync::Arc::new(reviewer),
+])?;
+let result = pipeline.run(agentscope::Msg::user("Draft and review this note")).await?;
+println!("{}", result.message.text_content("").unwrap_or_default());
+```
+
+The list must be nonempty with unique nonblank agent names. The first agent gets
+the original input; later agents receive only the preceding reply's visible text,
+joined by newline, in a fresh User message named after the preceding stage. No
+original task, full history, thinking, metadata or usage is forwarded; text is
+never promoted to system instructions and remains untrusted. Blank/thinking-only
+intermediate outputs or replies containing tool, multimodal or structured blocks
+stop the handoff rather than silently dropping unsupported content. The final
+agent's original reply is returned unchanged.
+
+Supply separate Memory instances and distinct StateKeys if sharing a backend.
+The pipeline never merges memories, but cannot detect deliberately shared backing
+memory through `dyn Agent`. Overlapping runs on this pipeline or its clones return
+Busy. Do not concurrently use its agents elsewhere. New runs reuse existing agent
+histories; they do not reset memory.
+
+Results include final `message` and ordered `steps`. `PipelineError` includes the
+one-based stage, name, cause and completed replies; approval/in-doubt errors are
+preserved and later stages are not dispatched. Invalid handoff identifies the
+completed source stage, which is also in `completed`. Original result records may
+contain private metadata/thinking: do not expose them as public logs or forward
+the whole record to another model.
+
+The pipeline interrupt handle cancels the active reply future and stops dispatch;
+it does not broadcast to unrelated agent operations. Dropping the run also stops
+dispatch. Neither rolls back side effects, memory changes or committed state;
+active effects may need reconciliation. Agent-level persistence guarantees apply.
+V1 is non-streaming only, not an Agent implementation, and has no pipeline-level
+transaction, durable checkpoint, auto-resume or retries. Every `run` starts at
+stage one, **not a resume**. Do not blindly rerun after failure; use retained agent
+handles for approval/reconciliation and explicitly arrange subsequent work.
+
+Offline deterministic example: `cargo run --example sequential_pipeline`.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -608,7 +655,8 @@ after they have been exercised by working examples.
 - [ ] Add per-session resumable interruption
 - [x] Add the independent SQLite `StateStore` plugin
 - [x] Provide an interactive single-agent CLI with durable session recovery
-- [ ] Provide multi-agent examples
+- [x] Minimal non-streaming sequential pipeline and writer/reviewer example
+- [ ] Pipeline streaming, durable resume, parallel/routed execution and delegation
 
 ### Storage Plugins
 
