@@ -463,14 +463,23 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 中间交接失败时，编号指产生该输出的阶段，该阶段也在 `completed` 中。
 这些原始输出可能含思考或私有元数据，不应直接作为公开日志或全部转发给下一个模型。
 
+`pipeline.stream(input).await?` 返回惰性的、可序列化 `PipelineEvent` 事件流。每个阶段依次
+发出 `StageStarted`、带独立一基 `pipeline_step` 和 Agent 名称包装的原始 `AgentEvent`，
+以及 `StageCompleted`。完整消费时，整条流以唯一一个 Pipeline `Finished` 或 `Error`
+结束。只有上一 Agent 发出 `Finished` 且公开文本交接校验通过，下一 Agent 才会启动；
+遇到确认、Agent 错误、中断或无效交接时发出终止 `Error`，不会启动后续阶段。
+
 `pipeline.interrupt_handle().interrupt()` 会停止当前 Pipeline 并丢弃活动 reply future，
 不广播中断其他 Agent 任务；直接丢弃运行 future 也停止后续调度。已发生的工具副作用、
 内存修改或存储提交不回滚；活动步骤可能需要外部核对，持久化仍取决于 Agent 本身。
-第一版只有非流式顺序执行，不是 Agent 的替代实现，也没有 Pipeline 事务、持久化快照、
-确认后自动续接或自动重试。每次 `run` 都从第一步开始，**不是恢复**；失败后不要盲目重跑。
-可通过保留的 Agent 引用处理确认/核对，然后由调用方显式安排后续工作。
+等待 `stream` 会占用共享运行锁但不调用 Agent，轮询才开始工作；丢弃事件流会释放锁，
+但不会补发终止事件。若依赖 Agent 持久化收尾，应消费到终止事件。Pipeline 不是 Agent
+的替代实现，也没有 Pipeline 事务、持久化快照、确认后自动续接或自动重试。每次调用都
+从第一步开始，**不是恢复**；失败后不要盲目重跑。可通过保留的 Agent 引用处理确认/核对，
+然后由调用方显式安排后续工作。
 
-确定性离线示例：`cargo run --example sequential_pipeline`。
+确定性离线示例：`cargo run --example sequential_pipeline` 与
+`cargo run --example sequential_pipeline_stream`。
 
 ## 路线图 / TODO
 
@@ -553,8 +562,8 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 - [ ] 支持会话级可恢复中断
 - [x] 添加独立的 SQLite `StateStore` 插件
 - [x] 提供带持久化会话恢复的交互式单 Agent 命令行示例
-- [x] 最小非流式顺序 Pipeline 与起草/审核双 Agent 示例
-- [ ] Pipeline 流式事件、持久化恢复、并行/路由与任务委派
+- [x] 最小顺序 Pipeline 与非流式/流式起草审核双 Agent 示例
+- [ ] Pipeline 持久化恢复、并行/路由与任务委派
 
 ### 存储插件
 

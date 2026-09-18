@@ -562,16 +562,28 @@ completed source stage, which is also in `completed`. Original result records ma
 contain private metadata/thinking: do not expose them as public logs or forward
 the whole record to another model.
 
+`pipeline.stream(input).await?` returns a lazy stream of serializable
+`PipelineEvent` values. Each stage emits `StageStarted`, its original `AgentEvent`
+values wrapped with a separate one-based `pipeline_step` and agent name, then
+`StageCompleted`. A fully consumed run ends with exactly one pipeline `Finished`
+or `Error`. The next agent starts only after the preceding agent emits `Finished`
+and its visible-text handoff validates. Confirmation, agent error, interruption or
+invalid handoff emits terminal `Error` and never dispatches a later stage.
+
 The pipeline interrupt handle cancels the active reply future and stops dispatch;
 it does not broadcast to unrelated agent operations. Dropping the run also stops
 dispatch. Neither rolls back side effects, memory changes or committed state;
 active effects may need reconciliation. Agent-level persistence guarantees apply.
-V1 is non-streaming only, not an Agent implementation, and has no pipeline-level
-transaction, durable checkpoint, auto-resume or retries. Every `run` starts at
-stage one, **not a resume**. Do not blindly rerun after failure; use retained agent
-handles for approval/reconciliation and explicitly arrange subsequent work.
+Awaiting `stream` reserves the shared run lock without invoking an agent; polling
+starts work, and dropping the stream releases the lock without a synthetic terminal
+event. Consume through the terminal event when durable agent finalization matters.
+The pipeline is not an Agent implementation and has no pipeline-level transaction,
+durable checkpoint, auto-resume or retries. Every invocation starts at stage one,
+**not a resume**. Do not blindly rerun after failure; use retained agent handles for
+approval/reconciliation and explicitly arrange subsequent work.
 
-Offline deterministic example: `cargo run --example sequential_pipeline`.
+Offline deterministic examples: `cargo run --example sequential_pipeline` and
+`cargo run --example sequential_pipeline_stream`.
 
 ## Roadmap / TODO
 
@@ -655,8 +667,8 @@ after they have been exercised by working examples.
 - [ ] Add per-session resumable interruption
 - [x] Add the independent SQLite `StateStore` plugin
 - [x] Provide an interactive single-agent CLI with durable session recovery
-- [x] Minimal non-streaming sequential pipeline and writer/reviewer example
-- [ ] Pipeline streaming, durable resume, parallel/routed execution and delegation
+- [x] Minimal sequential pipeline with non-streaming and streaming writer/reviewer examples
+- [ ] Pipeline durable resume, parallel/routed execution and delegation
 
 ### Storage Plugins
 

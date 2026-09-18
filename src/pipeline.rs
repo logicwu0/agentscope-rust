@@ -1,9 +1,14 @@
 //! Minimal sequential agent orchestration. No shared memory or automatic replay.
 
 mod error;
+mod event;
 pub use error::{PipelineConfigError, PipelineError, PipelineFailure};
+pub use event::PipelineEvent;
 
-use crate::{Agent, AgentInterruptHandle, ContentBlock, Msg, Role};
+use crate::{Agent, AgentError, AgentEvent, AgentInterruptHandle, ContentBlock, Msg, Role};
+use async_stream::stream;
+use futures_core::Stream;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
@@ -31,6 +36,15 @@ pub struct PipelineOutput {
 /// A lazy, cancellable sequential run.
 pub type PipelineFuture<'a> =
     Pin<Box<dyn Future<Output = Result<PipelineOutput, PipelineError>> + Send + 'a>>;
+
+/// Pipeline event stream. Runtime failures are terminal [`PipelineEvent::Error`]
+/// values so already emitted stage events remain available to the caller.
+pub type PipelineEventStream<'a> = Pin<Box<dyn Stream<Item = PipelineEvent> + Send + 'a>>;
+
+/// Lazy preparation of a pipeline stream. Only an overlapping-run `Busy` error
+/// is returned before a stream exists; agents start when the stream is polled.
+pub type PipelineStreamFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<PipelineEventStream<'a>, PipelineError>> + Send + 'a>>;
 
 struct Stage {
     name: String,
@@ -147,6 +161,175 @@ impl SequentialPipeline {
             }
             unreachable!("constructor rejects empty pipelines")
         })
+    }
+
+    /// Streams every stage through the same fixed-order and handoff rules as
+    /// [`Self::run`]. The stream owns the pipeline run lock until it terminates or
+    /// is dropped. Awaiting this method reserves the run but invokes no agent;
+    /// the first [`PipelineEvent::StageStarted`] and the agent start are lazy.
+    ///
+    /// Wrapped [`AgentEvent`] values preserve their agent-local `ReAct` `step`.
+    /// `pipeline_step` is separately one-based. An agent `Finished` event is
+    /// followed by `StageCompleted`; after the last stage, `Finished` contains
+    /// the complete output. Confirmation and agent `Error` events are forwarded,
+    /// then followed by one terminal pipeline `Error`. No later stage starts.
+    ///
+    /// Consumers must poll through a terminal pipeline event for agent state-store
+    /// finalization. Dropping the stream stops dispatch and releases the run lock,
+    /// but cannot roll back memory, durable state, or external tool effects.
+    /// # Errors
+    /// Returns `Busy` only when another run/stream owns this pipeline or a clone.
+    #[must_use]
+    pub fn stream(&self, input: Msg) -> PipelineStreamFuture<'_> {
+        Box::pin(async move {
+            let guard = self.operation.try_lock().map_err(|_| busy_error())?;
+            let mut interrupt = self.interrupt.token();
+            Ok(Box::pin(stream! {
+                let _guard = guard;
+                let mut completed = Vec::with_capacity(self.stages.len());
+                let mut incoming = input;
+                for (index, stage) in self.stages.iter().enumerate() {
+                    let pipeline_step = index + 1;
+                    let agent_name = stage.name.clone();
+                    if interrupt.is_interrupted() {
+                        yield pipeline_error_event(pipeline_step, &agent_name, &mut completed, PipelineFailure::Interrupted);
+                        return;
+                    }
+                    yield PipelineEvent::StageStarted { pipeline_step, agent_name: agent_name.clone() };
+                    let started = tokio::select! {
+                        biased;
+                        () = interrupt.cancelled() => Err(PipelineFailure::Interrupted),
+                        result = stage.agent.stream(incoming) => result.map_err(|e| PipelineFailure::Agent(Box::new(e))),
+                    };
+                    let mut events = match started {
+                        Ok(events) => events,
+                        Err(cause) => {
+                            yield pipeline_error_event(pipeline_step, &agent_name, &mut completed, cause);
+                            return;
+                        }
+                    };
+                    let message = loop {
+                        let item = tokio::select! {
+                            biased;
+                            () = interrupt.cancelled() => {
+                                yield pipeline_error_event(pipeline_step, &agent_name, &mut completed, PipelineFailure::Interrupted);
+                                return;
+                            }
+                            item = events.next() => item,
+                        };
+                        let Some(item) = item else {
+                            yield pipeline_error_event(
+                                pipeline_step, &agent_name, &mut completed,
+                                PipelineFailure::Agent(Box::new(AgentError::InvalidModelResponse(
+                                    "agent stream ended without a terminal event".into(),
+                                ))),
+                            );
+                            return;
+                        };
+                        match item {
+                            Err(error) => {
+                                yield pipeline_error_event(
+                                    pipeline_step, &agent_name, &mut completed,
+                                    PipelineFailure::Agent(Box::new(error)),
+                                );
+                                return;
+                            }
+                            Ok(event) => {
+                                let terminal = agent_terminal(&event);
+                                yield PipelineEvent::Agent {
+                                    pipeline_step,
+                                    agent_name: agent_name.clone(),
+                                    event,
+                                };
+                                match terminal {
+                                    Some(Ok(message)) => break message,
+                                    Some(Err(cause)) => {
+                                        yield pipeline_error_event(
+                                            pipeline_step, &agent_name, &mut completed, cause,
+                                        );
+                                        return;
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    };
+                    drop(events);
+                    let stage_result = PipelineStep {
+                        step: pipeline_step,
+                        agent_name: agent_name.clone(),
+                        message: message.clone(),
+                    };
+                    completed.push(stage_result.clone());
+                    yield PipelineEvent::StageCompleted { stage: stage_result };
+                    if pipeline_step == self.stages.len() {
+                        yield PipelineEvent::Finished {
+                            output: PipelineOutput { message, steps: completed },
+                        };
+                        return;
+                    }
+                    incoming = match handoff(&agent_name, &message) {
+                        Ok(message) => message,
+                        Err(reason) => {
+                            yield pipeline_error_event(
+                                pipeline_step, &agent_name, &mut completed,
+                                PipelineFailure::InvalidHandoff(reason),
+                            );
+                            return;
+                        }
+                    };
+                }
+            }) as PipelineEventStream<'_>)
+        })
+    }
+}
+
+fn busy_error() -> PipelineError {
+    PipelineError {
+        step: None,
+        agent_name: None,
+        completed: Vec::new(),
+        cause: PipelineFailure::Busy,
+    }
+}
+
+fn agent_terminal(event: &AgentEvent) -> Option<Result<Msg, PipelineFailure>> {
+    match event {
+        AgentEvent::Finished { message, .. } => Some(Ok(message.clone())),
+        AgentEvent::ToolConfirmationRequired { checkpoint } => Some(Err(PipelineFailure::Agent(
+            Box::new(AgentError::ToolConfirmationRequired {
+                checkpoint: checkpoint.clone(),
+            }),
+        ))),
+        AgentEvent::Error { error, .. } => {
+            Some(Err(PipelineFailure::Agent(Box::new(error.clone()))))
+        }
+        _ => None,
+    }
+}
+
+fn pipeline_error_event(
+    step: usize,
+    name: &str,
+    completed: &mut Vec<PipelineStep>,
+    cause: PipelineFailure,
+) -> PipelineEvent {
+    PipelineEvent::Error {
+        error: pipeline_error(step, name, completed, cause),
+    }
+}
+
+fn pipeline_error(
+    step: usize,
+    name: &str,
+    completed: &mut Vec<PipelineStep>,
+    cause: PipelineFailure,
+) -> PipelineError {
+    PipelineError {
+        step: Some(step),
+        agent_name: Some(name.to_owned()),
+        completed: std::mem::take(completed),
+        cause,
     }
 }
 
