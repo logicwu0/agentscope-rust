@@ -1,11 +1,19 @@
 //! Minimal sequential agent orchestration. No shared memory or automatic replay.
 
+mod checkpoint;
 mod error;
 mod event;
+pub use checkpoint::{
+    InMemoryPipelineStore, PIPELINE_CHECKPOINT_VERSION, PipelineCheckpoint,
+    PipelineCheckpointStatus, PipelineRecord, PipelineStore, PipelineStoreError,
+    PipelineStoreFuture,
+};
 pub use error::{PipelineConfigError, PipelineError, PipelineFailure};
 pub use event::PipelineEvent;
 
-use crate::{Agent, AgentError, AgentEvent, AgentInterruptHandle, ContentBlock, Msg, Role};
+use crate::{
+    Agent, AgentError, AgentEvent, AgentInterruptHandle, ContentBlock, Msg, Role, StateKey,
+};
 use async_stream::stream;
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -281,6 +289,196 @@ impl SequentialPipeline {
                 }
             }) as PipelineEventStream<'_>)
         })
+    }
+
+    /// Starts a NEW revisioned run. Stages are marked in flight before dispatch
+    /// and recorded complete before the next stage starts. A store conflict,
+    /// crash, cancellation, or agent failure never authorizes automatic replay.
+    /// Each agent must also have its own durable state binding if required.
+    /// # Errors
+    /// Busy, store errors, agent failures, or invalid handoffs.
+    #[must_use]
+    pub fn run_checkpointed<'a>(
+        &'a self,
+        store: &'a dyn PipelineStore,
+        key: StateKey,
+        input: Msg,
+    ) -> PipelineFuture<'a> {
+        Box::pin(async move {
+            let _guard = self.operation.try_lock().map_err(|_| busy_error())?;
+            let interrupt = self.interrupt.token();
+            let names = self.stages.iter().map(|stage| stage.name.clone()).collect();
+            let checkpoint = PipelineCheckpoint {
+                version: PIPELINE_CHECKPOINT_VERSION,
+                agent_names: names,
+                completed: Vec::new(),
+                next_input: input,
+                status: PipelineCheckpointStatus::Ready,
+            };
+            let record = store
+                .save(key.clone(), None, checkpoint)
+                .await
+                .map_err(|error| {
+                    checkpoint_error(
+                        None,
+                        None,
+                        Vec::new(),
+                        PipelineFailure::Store(error.to_string()),
+                    )
+                })?;
+            self.execute_checkpointed(store, key, record, interrupt)
+                .await
+        })
+    }
+
+    /// Resumes only from a committed `Ready` boundary. An `InFlight` checkpoint
+    /// is deliberately rejected because that stage may have had side effects.
+    /// This never resumes an agent's own pending confirmation or execution.
+    /// # Errors
+    /// Busy, missing/corrupt/incompatible/unsafe checkpoint, store or agent error.
+    #[must_use]
+    pub fn resume_checkpointed<'a>(
+        &'a self,
+        store: &'a dyn PipelineStore,
+        key: StateKey,
+    ) -> PipelineFuture<'a> {
+        Box::pin(async move {
+            let _guard = self.operation.try_lock().map_err(|_| busy_error())?;
+            let interrupt = self.interrupt.token();
+            let record = store
+                .load(&key)
+                .await
+                .map_err(|error| {
+                    checkpoint_error(
+                        None,
+                        None,
+                        Vec::new(),
+                        PipelineFailure::Store(error.to_string()),
+                    )
+                })?
+                .ok_or_else(|| {
+                    checkpoint_error(
+                        None,
+                        None,
+                        Vec::new(),
+                        PipelineFailure::UnsafeResume("checkpoint does not exist".into()),
+                    )
+                })?;
+            if record.revision == 0 {
+                return Err(checkpoint_error(
+                    None,
+                    None,
+                    record.checkpoint.completed.clone(),
+                    PipelineFailure::UnsafeResume("checkpoint revision is zero".into()),
+                ));
+            }
+            self.validate_checkpoint(&record.checkpoint)?;
+            self.execute_checkpointed(store, key, record, interrupt)
+                .await
+        })
+    }
+
+    fn validate_checkpoint(&self, checkpoint: &PipelineCheckpoint) -> Result<(), PipelineError> {
+        let names: Vec<_> = self.stages.iter().map(|stage| stage.name.clone()).collect();
+        let valid = checkpoint.version == PIPELINE_CHECKPOINT_VERSION
+            && checkpoint.agent_names == names
+            && checkpoint.status == PipelineCheckpointStatus::Ready
+            && checkpoint.completed.len() < self.stages.len()
+            && checkpoint
+                .completed
+                .iter()
+                .enumerate()
+                .all(|(index, step)| step.step == index + 1 && step.agent_name == names[index]);
+        if !valid {
+            return Err(checkpoint_error(None, None, checkpoint.completed.clone(),
+                PipelineFailure::UnsafeResume("checkpoint is in flight, finished, corrupt, or configured for another pipeline".into())));
+        }
+        Ok(())
+    }
+
+    async fn execute_checkpointed(
+        &self,
+        store: &dyn PipelineStore,
+        key: StateKey,
+        mut record: PipelineRecord,
+        mut interrupt: crate::agent::AgentInterruptToken,
+    ) -> Result<PipelineOutput, PipelineError> {
+        let start = record.checkpoint.completed.len();
+        for index in start..self.stages.len() {
+            let stage = &self.stages[index];
+            let completed = record.checkpoint.completed.clone();
+            let failure = |cause| {
+                checkpoint_error(
+                    Some(index + 1),
+                    Some(stage.name.clone()),
+                    completed.clone(),
+                    cause,
+                )
+            };
+            if interrupt.is_interrupted() {
+                return Err(failure(PipelineFailure::Interrupted));
+            }
+            record.checkpoint.status = PipelineCheckpointStatus::InFlight;
+            record = store
+                .save(key.clone(), Some(record.revision), record.checkpoint)
+                .await
+                .map_err(|error| failure(PipelineFailure::Store(error.to_string())))?;
+            let input = record.checkpoint.next_input.clone();
+            let message = tokio::select! {
+                biased;
+                () = interrupt.cancelled() => Err(PipelineFailure::Interrupted),
+                result = stage.agent.reply(input) => result.map_err(|error| PipelineFailure::Agent(Box::new(error))),
+            }.map_err(failure)?;
+            let next_input = if index + 1 == self.stages.len() {
+                record.checkpoint.next_input.clone()
+            } else {
+                handoff(&stage.name, &message)
+                    .map_err(|reason| failure(PipelineFailure::InvalidHandoff(reason)))?
+            };
+            record.checkpoint.completed.push(PipelineStep {
+                step: index + 1,
+                agent_name: stage.name.clone(),
+                message: message.clone(),
+            });
+            record.checkpoint.next_input = next_input;
+            record.checkpoint.status = if index + 1 == self.stages.len() {
+                PipelineCheckpointStatus::Finished
+            } else {
+                PipelineCheckpointStatus::Ready
+            };
+            record = store
+                .save(key.clone(), Some(record.revision), record.checkpoint)
+                .await
+                .map_err(|error| {
+                    checkpoint_error(
+                        Some(index + 1),
+                        Some(stage.name.clone()),
+                        completed,
+                        PipelineFailure::Store(error.to_string()),
+                    )
+                })?;
+            if index + 1 == self.stages.len() {
+                return Ok(PipelineOutput {
+                    message,
+                    steps: record.checkpoint.completed,
+                });
+            }
+        }
+        unreachable!("validated checkpoint has a remaining stage")
+    }
+}
+
+fn checkpoint_error(
+    step: Option<usize>,
+    agent_name: Option<String>,
+    completed: Vec<PipelineStep>,
+    cause: PipelineFailure,
+) -> PipelineError {
+    PipelineError {
+        step,
+        agent_name,
+        completed,
+        cause,
     }
 }
 

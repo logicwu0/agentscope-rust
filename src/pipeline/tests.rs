@@ -730,3 +730,197 @@ async fn stream_interrupt_between_stages_does_not_start_the_next_stage() {
     assert_eq!(error.cause, PipelineFailure::Interrupted);
     assert!(next.recorded_requests().is_empty());
 }
+
+struct InterruptAtBoundary {
+    inner: InMemoryPipelineStore,
+    handle: AgentInterruptHandle,
+}
+
+impl PipelineStore for InterruptAtBoundary {
+    fn load<'a>(&'a self, key: &'a StateKey) -> PipelineStoreFuture<'a, Option<PipelineRecord>> {
+        self.inner.load(key)
+    }
+
+    fn save(
+        &self,
+        key: StateKey,
+        revision: Option<u64>,
+        checkpoint: PipelineCheckpoint,
+    ) -> PipelineStoreFuture<'_, PipelineRecord> {
+        Box::pin(async move {
+            let interrupt = checkpoint.status == PipelineCheckpointStatus::Ready
+                && checkpoint.completed.len() == 1;
+            let record = self.inner.save(key, revision, checkpoint).await?;
+            if interrupt {
+                self.handle.interrupt();
+            }
+            Ok(record)
+        })
+    }
+}
+
+#[tokio::test]
+async fn checkpointed_run_resumes_only_after_committed_stage_boundary() {
+    let writer_model = model("draft");
+    let reviewer_model = model("reviewed");
+    let pipeline = SequentialPipeline::new(vec![
+        agent("writer", writer_model.clone()),
+        agent("reviewer", reviewer_model.clone()),
+    ])
+    .unwrap();
+    let store = InterruptAtBoundary {
+        inner: InMemoryPipelineStore::new(),
+        handle: pipeline.interrupt_handle(),
+    };
+    let key = StateKey::new("user", "pipeline-boundary").unwrap();
+    let error = pipeline
+        .run_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.step, Some(2));
+    assert_eq!(error.completed.len(), 1);
+    assert_eq!(error.cause, PipelineFailure::Interrupted);
+    assert!(reviewer_model.recorded_requests().is_empty());
+    let record = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(record.revision, 3);
+    assert_eq!(record.checkpoint.status, PipelineCheckpointStatus::Ready);
+    assert_eq!(record.checkpoint.completed.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<PipelineRecord>(&serde_json::to_string(&record).unwrap()).unwrap(),
+        record
+    );
+
+    let output = pipeline
+        .resume_checkpointed(&store, key.clone())
+        .await
+        .unwrap();
+    assert_eq!(output.steps.len(), 2);
+    assert_eq!(writer_model.recorded_requests().len(), 1);
+    assert_eq!(reviewer_model.recorded_requests().len(), 1);
+    assert_eq!(
+        reviewer_model.recorded_requests()[0].messages.last(),
+        Some(&record.checkpoint.next_input)
+    );
+    let finished = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(
+        finished.checkpoint.status,
+        PipelineCheckpointStatus::Finished
+    );
+    assert_eq!(finished.revision, 5);
+    assert!(matches!(
+        pipeline.resume_checkpointed(&store, key).await,
+        Err(PipelineError {
+            cause: PipelineFailure::UnsafeResume(_),
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn checkpointed_inflight_failure_cannot_be_replayed() {
+    let failed = Arc::new(MockChatModel::new("failed").with_error(ModelError::new("offline")));
+    let pipeline = SequentialPipeline::new(vec![agent("worker", failed.clone())]).unwrap();
+    let store = InMemoryPipelineStore::new();
+    let key = StateKey::new("user", "unsafe").unwrap();
+    let error = pipeline
+        .run_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error.cause, PipelineFailure::Agent(_)));
+    let record = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(record.revision, 2);
+    assert_eq!(record.checkpoint.status, PipelineCheckpointStatus::InFlight);
+    assert!(matches!(
+        pipeline.resume_checkpointed(&store, key.clone()).await,
+        Err(PipelineError {
+            cause: PipelineFailure::UnsafeResume(_),
+            ..
+        })
+    ));
+    assert!(matches!(
+        pipeline
+            .run_checkpointed(&store, key, Msg::user("duplicate"))
+            .await,
+        Err(PipelineError {
+            cause: PipelineFailure::Store(_),
+            ..
+        })
+    ));
+    assert_eq!(failed.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn checkpointed_resume_rejects_changed_pipeline_without_dispatch() {
+    let store = InMemoryPipelineStore::new();
+    let key = StateKey::new("user", "mismatch").unwrap();
+    store
+        .save(
+            key.clone(),
+            None,
+            PipelineCheckpoint {
+                version: PIPELINE_CHECKPOINT_VERSION,
+                agent_names: vec!["old".into()],
+                completed: Vec::new(),
+                next_input: Msg::user("task"),
+                status: PipelineCheckpointStatus::Ready,
+            },
+        )
+        .await
+        .unwrap();
+    let current = model("must not run");
+    let pipeline = SequentialPipeline::new(vec![agent("new", current.clone())]).unwrap();
+    assert!(matches!(
+        pipeline.resume_checkpointed(&store, key).await,
+        Err(PipelineError {
+            cause: PipelineFailure::UnsafeResume(_),
+            ..
+        })
+    ));
+    assert!(current.recorded_requests().is_empty());
+}
+
+struct RejectCompletion(InMemoryPipelineStore);
+
+impl PipelineStore for RejectCompletion {
+    fn load<'a>(&'a self, key: &'a StateKey) -> PipelineStoreFuture<'a, Option<PipelineRecord>> {
+        self.0.load(key)
+    }
+
+    fn save(
+        &self,
+        key: StateKey,
+        revision: Option<u64>,
+        checkpoint: PipelineCheckpoint,
+    ) -> PipelineStoreFuture<'_, PipelineRecord> {
+        if checkpoint.status == PipelineCheckpointStatus::Finished {
+            return Box::pin(async { Err(PipelineStoreError::new("disk write failed")) });
+        }
+        self.0.save(key, revision, checkpoint)
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_commit_failure_leaves_inflight_and_never_replays() {
+    let model = model("result may have effects");
+    let pipeline = SequentialPipeline::new(vec![agent("worker", model.clone())]).unwrap();
+    let store = RejectCompletion(InMemoryPipelineStore::new());
+    let key = StateKey::new("user", "failed-save").unwrap();
+    let error = pipeline
+        .run_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error.cause, PipelineFailure::Store(_)));
+    assert_eq!(model.recorded_requests().len(), 1);
+    assert_eq!(
+        store.load(&key).await.unwrap().unwrap().checkpoint.status,
+        PipelineCheckpointStatus::InFlight
+    );
+    assert!(matches!(
+        pipeline.resume_checkpointed(&store, key).await,
+        Err(PipelineError {
+            cause: PipelineFailure::UnsafeResume(_),
+            ..
+        })
+    ));
+    assert_eq!(model.recorded_requests().len(), 1);
+}

@@ -34,6 +34,10 @@ pub enum PipelineFailure {
     Agent(Box<AgentError>),
     /// A completed intermediate output cannot be safely mapped to text input.
     InvalidHandoff(String),
+    /// Checkpoint storage failed; the last active stage may have had effects.
+    Store(String),
+    /// Stored progress is incompatible, in flight, or already finished.
+    UnsafeResume(String),
 }
 
 /// Run failure with an ordered record of already-observed completed replies.
@@ -64,6 +68,8 @@ impl fmt::Display for PipelineError {
             }
             PipelineFailure::Agent(error) => write!(f, "{error}"),
             PipelineFailure::InvalidHandoff(reason) => write!(f, "invalid handoff: {reason}"),
+            PipelineFailure::Store(reason) => write!(f, "checkpoint store: {reason}"),
+            PipelineFailure::UnsafeResume(reason) => write!(f, "unsafe pipeline resume: {reason}"),
         }
     }
 }

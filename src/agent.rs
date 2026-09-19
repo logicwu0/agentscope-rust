@@ -26,6 +26,7 @@ pub use confirmation::{
 pub use event::AgentEvent;
 pub use hook::{AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture, AgentHookResult};
 pub use interrupt::AgentInterruptHandle;
+pub(crate) use interrupt::AgentInterruptToken;
 pub use react::ReActAgent;
 pub use state::{AGENT_STATE_VERSION, AgentState};
 pub use store::{

@@ -481,6 +481,15 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 确定性离线示例：`cargo run --example sequential_pipeline` 与
 `cargo run --example sequential_pipeline_stream`。
 
+需要显式的阶段边界持久化恢复时，使用 `run_checkpointed(&store, key, input)`，之后可调用
+`resume_checkpointed(&store, key)`。`agentscope-state-sqlite::SQLitePipelineStore` 用独立
+数据表保存带 revision 的检查点；`InMemoryPipelineStore` 只适合测试或非持久化场景。
+每个阶段调用前先提交 `InFlight`，回复与下一阶段交接完成后才提交 `Ready`。重启后仅
+`Ready` 可自动继续；`InFlight` 阶段可能已经产生副作用，必须先人工核对，不能自动重试。
+已完成的运行也不能恢复；新运行需要新 key。各 Agent 如需持久化，仍须单独配置状态存储
+与 key；Pipeline 检查点不会保存 Agent 记忆、自动续接工具确认，Agent 与 Pipeline 的写入
+也不构成原子事务。当前检查点恢复仅支持非流式调用。
+
 ## 路线图 / TODO
 
 项目将采用渐进式开发。只有经过可运行示例验证的接口，才会逐步进入稳定状态。
@@ -563,7 +572,8 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 - [x] 添加独立的 SQLite `StateStore` 插件
 - [x] 提供带持久化会话恢复的交互式单 Agent 命令行示例
 - [x] 最小顺序 Pipeline 与非流式/流式起草审核双 Agent 示例
-- [ ] Pipeline 持久化恢复、并行/路由与任务委派
+- [x] 带 revision 的 SQLite Pipeline 检查点与安全阶段边界恢复（非流式）
+- [ ] 执行中状态核对、带检查点的流式执行、并行/路由与任务委派
 
 ### 存储插件
 

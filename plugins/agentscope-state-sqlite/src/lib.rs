@@ -1,5 +1,8 @@
 //! `SQLite` persistence for complete `AgentScope` agent snapshots.
 
+mod pipeline;
+pub use pipeline::SQLitePipelineStore;
+
 use agentscope::{
     AgentState, StateKey, StateRecord, StateStore, StateStoreError, StateStoreFuture,
     StateStoreResult,

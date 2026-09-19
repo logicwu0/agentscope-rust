@@ -11,8 +11,11 @@ pub mod pipeline;
 pub mod tool;
 
 pub use pipeline::{
-    PipelineConfigError, PipelineError, PipelineEvent, PipelineEventStream, PipelineFailure,
-    PipelineFuture, PipelineOutput, PipelineStep, PipelineStreamFuture, SequentialPipeline,
+    InMemoryPipelineStore, PIPELINE_CHECKPOINT_VERSION, PipelineCheckpoint,
+    PipelineCheckpointStatus, PipelineConfigError, PipelineError, PipelineEvent,
+    PipelineEventStream, PipelineFailure, PipelineFuture, PipelineOutput, PipelineRecord,
+    PipelineStep, PipelineStore, PipelineStoreError, PipelineStoreFuture, PipelineStreamFuture,
+    SequentialPipeline,
 };
 
 pub use agent::{

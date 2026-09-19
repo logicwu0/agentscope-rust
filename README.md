@@ -585,6 +585,18 @@ approval/reconciliation and explicitly arrange subsequent work.
 Offline deterministic examples: `cargo run --example sequential_pipeline` and
 `cargo run --example sequential_pipeline_stream`.
 
+For explicit durable stage-boundary recovery, use
+`run_checkpointed(&store, key, input)` and later `resume_checkpointed(&store, key)`.
+`agentscope-state-sqlite::SQLitePipelineStore` keeps revisioned checkpoints in a
+separate table (or use `InMemoryPipelineStore` for non-durable tests). The pipeline
+commits `InFlight` **before** invoking each agent and commits `Ready` only after
+its reply and next handoff are complete. After a crash, only `Ready` can resume;
+`InFlight` is intentionally rejected because its agent may already have performed
+effects. A finished run also cannot be resumed. A new run needs a new key. Each
+agent still needs its own durable state store/key where applicable; the pipeline
+checkpoint does not snapshot agent memory, resume tool approvals, or make agent
+and pipeline writes atomic. This first recovery API is non-streaming only.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -668,7 +680,8 @@ after they have been exercised by working examples.
 - [x] Add the independent SQLite `StateStore` plugin
 - [x] Provide an interactive single-agent CLI with durable session recovery
 - [x] Minimal sequential pipeline with non-streaming and streaming writer/reviewer examples
-- [ ] Pipeline durable resume, parallel/routed execution and delegation
+- [x] Revisioned SQLite pipeline checkpoints and safe stage-boundary resume (non-streaming)
+- [ ] In-flight reconciliation, checkpointed streaming, parallel/routed execution and delegation
 
 ### Storage Plugins
 
