@@ -924,3 +924,156 @@ async fn checkpoint_commit_failure_leaves_inflight_and_never_replays() {
     ));
     assert_eq!(model.recorded_requests().len(), 1);
 }
+
+fn verified_reply(name: &str, text: &str) -> Msg {
+    Msg::new(name, Role::Assistant, [ContentBlock::from(text)])
+}
+
+#[tokio::test]
+async fn verified_inflight_result_commits_boundary_without_dispatch_then_resumes() {
+    let first = model("draft");
+    let uncertain =
+        Arc::new(MockChatModel::new("uncertain").with_error(ModelError::new("outcome unknown")));
+    let last = model("published");
+    let pipeline = SequentialPipeline::new(vec![
+        agent("writer", first.clone()),
+        agent("reviewer", uncertain.clone()),
+        agent("publisher", last.clone()),
+    ])
+    .unwrap();
+    let store = InMemoryPipelineStore::new();
+    let key = StateKey::new("user", "reconciled").unwrap();
+    let error = pipeline
+        .run_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.step, Some(2));
+    let inflight = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(inflight.revision, 4);
+    assert_eq!(inflight.checkpoint.completed.len(), 1);
+    assert_eq!(
+        inflight.checkpoint.status,
+        PipelineCheckpointStatus::InFlight
+    );
+
+    let verified = verified_reply("reviewer", "approved draft");
+    let ready = pipeline
+        .reconcile_checkpointed(&store, key.clone(), inflight.revision, verified.clone())
+        .await
+        .unwrap();
+    assert_eq!(ready.revision, 5);
+    assert_eq!(ready.checkpoint.status, PipelineCheckpointStatus::Ready);
+    assert_eq!(ready.checkpoint.completed[1].message, verified);
+    assert_eq!(
+        ready.checkpoint.next_input.text_content("").as_deref(),
+        Some("approved draft")
+    );
+    assert!(last.recorded_requests().is_empty());
+    assert!(ready.checkpoint.finished_output().is_none());
+
+    let output = pipeline
+        .resume_checkpointed(&store, key.clone())
+        .await
+        .unwrap();
+    assert_eq!(output.steps.len(), 3);
+    assert_eq!(first.recorded_requests().len(), 1);
+    assert_eq!(uncertain.recorded_requests().len(), 1);
+    assert_eq!(last.recorded_requests().len(), 1);
+    assert_eq!(
+        last.recorded_requests()[0].messages.last(),
+        Some(&ready.checkpoint.next_input)
+    );
+    let finished = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(finished.checkpoint.finished_output(), Some(output));
+    assert!(matches!(
+        pipeline
+            .reconcile_checkpointed(&store, key, inflight.revision, verified)
+            .await,
+        Err(PipelineError {
+            cause: PipelineFailure::UnsafeResume(_),
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn verified_final_inflight_result_finishes_without_replaying_agent() {
+    let uncertain =
+        Arc::new(MockChatModel::new("uncertain").with_error(ModelError::new("outcome unknown")));
+    let pipeline = SequentialPipeline::new(vec![agent("worker", uncertain.clone())]).unwrap();
+    let store = InMemoryPipelineStore::new();
+    let key = StateKey::new("user", "final-reconcile").unwrap();
+    pipeline
+        .run_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap_err();
+    let inflight = store.load(&key).await.unwrap().unwrap();
+    let verified = verified_reply("worker", "confirmed result");
+    let finished = pipeline
+        .reconcile_checkpointed(&store, key.clone(), inflight.revision, verified.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        finished.checkpoint.status,
+        PipelineCheckpointStatus::Finished
+    );
+    assert_eq!(
+        finished.checkpoint.finished_output().unwrap().message,
+        verified
+    );
+    assert_eq!(uncertain.recorded_requests().len(), 1);
+    assert!(matches!(
+        pipeline.resume_checkpointed(&store, key).await,
+        Err(PipelineError {
+            cause: PipelineFailure::UnsafeResume(_),
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_stale_or_invalid_evidence_without_mutation() {
+    let pipeline = SequentialPipeline::new(vec![
+        agent(
+            "worker",
+            Arc::new(MockChatModel::new("failed").with_error(ModelError::new("unknown"))),
+        ),
+        agent("next", model("unused")),
+    ])
+    .unwrap();
+    let store = InMemoryPipelineStore::new();
+    let key = StateKey::new("user", "invalid-reconcile").unwrap();
+    pipeline
+        .run_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap_err();
+    let before = store.load(&key).await.unwrap().unwrap();
+    let attempts = [
+        (before.revision + 1, verified_reply("worker", "okay")),
+        (before.revision, Msg::user("not an assistant")),
+        (before.revision, verified_reply("other", "wrong agent")),
+        (before.revision, verified_reply("worker", "   ")),
+        (
+            before.revision,
+            Msg::new(
+                "worker",
+                Role::Assistant,
+                [
+                    ContentBlock::from("visible"),
+                    ToolResultBlock::success("call", "tool", "result")
+                        .unwrap()
+                        .into(),
+                ],
+            ),
+        ),
+    ];
+    for (revision, message) in attempts {
+        assert!(
+            pipeline
+                .reconcile_checkpointed(&store, key.clone(), revision, message)
+                .await
+                .is_err()
+        );
+        assert_eq!(store.load(&key).await.unwrap().unwrap(), before);
+    }
+}

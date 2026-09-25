@@ -1,6 +1,6 @@
 //! Explicit, revisioned stage-boundary checkpoints.
 
-use super::PipelineStep;
+use super::{PipelineOutput, PipelineStep};
 use crate::{Msg, StateKey};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Mutex};
@@ -32,6 +32,26 @@ pub struct PipelineCheckpoint {
     pub completed: Vec<PipelineStep>,
     pub next_input: Msg,
     pub status: PipelineCheckpointStatus,
+}
+
+impl PipelineCheckpoint {
+    /// Returns the committed output of a finished run, if structurally complete.
+    #[must_use]
+    pub fn finished_output(&self) -> Option<PipelineOutput> {
+        if self.status != PipelineCheckpointStatus::Finished
+            || self.completed.len() != self.agent_names.len()
+            || !self.completed.iter().enumerate().all(|(index, step)| {
+                step.step == index + 1 && step.agent_name == self.agent_names[index]
+            })
+        {
+            return None;
+        }
+        let message = self.completed.last()?.message.clone();
+        Some(PipelineOutput {
+            message,
+            steps: self.completed.clone(),
+        })
+    }
 }
 
 /// One optimistic-concurrency revision of a pipeline checkpoint.

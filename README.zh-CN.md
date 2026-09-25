@@ -490,6 +490,13 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 与 key；Pipeline 检查点不会保存 Agent 记忆、自动续接工具确认，Agent 与 Pipeline 的写入
 也不构成原子事务。当前检查点恢复仅支持非流式调用。
 
+在外部独立核实 `InFlight` 阶段的真实最终回复，并核对相应 Agent/工具状态后，可调用
+`pipeline.reconcile_checkpointed(&store, key, record.revision, verified_reply).await?`。
+回复必须是以当前 Agent 命名的 `Assistant` 消息；这个身份校验**不能证明**外部执行结果。
+接口仅通过 revision 比较写入已核实的结果，不调用 Agent，也不会自动启动下一阶段。
+若新检查点为 `Ready`，再显式调用 `resume_checkpointed`；若是最后阶段，可读取
+`record.checkpoint.finished_output()`。旧 revision、无效交接或重复核对不会修改检查点。
+
 ## 路线图 / TODO
 
 项目将采用渐进式开发。只有经过可运行示例验证的接口，才会逐步进入稳定状态。
@@ -573,7 +580,8 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 - [x] 提供带持久化会话恢复的交互式单 Agent 命令行示例
 - [x] 最小顺序 Pipeline 与非流式/流式起草审核双 Agent 示例
 - [x] 带 revision 的 SQLite Pipeline 检查点与安全阶段边界恢复（非流式）
-- [ ] 执行中状态核对、带检查点的流式执行、并行/路由与任务委派
+- [x] 显式提交已核实的执行中阶段结果，并用 revision 防止重复提交
+- [ ] 带检查点的流式执行、并行/路由与任务委派
 
 ### 存储插件
 

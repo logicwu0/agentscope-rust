@@ -372,17 +372,111 @@ impl SequentialPipeline {
                     PipelineFailure::UnsafeResume("checkpoint revision is zero".into()),
                 ));
             }
-            self.validate_checkpoint(&record.checkpoint)?;
+            self.validate_checkpoint(&record.checkpoint, PipelineCheckpointStatus::Ready)?;
             self.execute_checkpointed(store, key, record, interrupt)
                 .await
         })
     }
 
-    fn validate_checkpoint(&self, checkpoint: &PipelineCheckpoint) -> Result<(), PipelineError> {
+    /// Records an externally verified final reply for the one `InFlight` stage.
+    /// This method does NOT call the agent, execute tools, approve pending calls,
+    /// or prove that `message` reflects the actual external outcome. The caller
+    /// must reconcile that outcome (and the agent's own state) first. The exact
+    /// revision read during inspection is required to reject stale decisions.
+    /// A successful write commits `Ready` for a later explicit resume, or
+    /// `Finished` for the final stage; it never dispatches the next stage.
+    ///
+    /// The verified reply must be an Assistant message named for the active
+    /// agent. Intermediate replies must also support the ordinary text handoff.
+    /// # Errors
+    /// Busy, missing/stale/incompatible checkpoint, invalid reply, or store error.
+    pub async fn reconcile_checkpointed(
+        &self,
+        store: &dyn PipelineStore,
+        key: StateKey,
+        expected_revision: u64,
+        message: Msg,
+    ) -> Result<PipelineRecord, PipelineError> {
+        let _guard = self.operation.try_lock().map_err(|_| busy_error())?;
+        let record = store
+            .load(&key)
+            .await
+            .map_err(|error| {
+                checkpoint_error(
+                    None,
+                    None,
+                    Vec::new(),
+                    PipelineFailure::Store(error.to_string()),
+                )
+            })?
+            .ok_or_else(|| {
+                checkpoint_error(
+                    None,
+                    None,
+                    Vec::new(),
+                    PipelineFailure::UnsafeResume("checkpoint does not exist".into()),
+                )
+            })?;
+        if record.revision == 0 || record.revision != expected_revision {
+            return Err(checkpoint_error(
+                None,
+                None,
+                record.checkpoint.completed,
+                PipelineFailure::UnsafeResume(
+                    "checkpoint revision changed; inspect it again".into(),
+                ),
+            ));
+        }
+        self.validate_checkpoint(&record.checkpoint, PipelineCheckpointStatus::InFlight)?;
+        let index = record.checkpoint.completed.len();
+        let stage = &self.stages[index];
+        let completed = record.checkpoint.completed.clone();
+        let failure = |cause| {
+            checkpoint_error(
+                Some(index + 1),
+                Some(stage.name.clone()),
+                completed.clone(),
+                cause,
+            )
+        };
+        if message.role != Role::Assistant || message.name != stage.name {
+            return Err(failure(PipelineFailure::UnsafeResume(
+                "verified reply must be an Assistant message from the active agent".into(),
+            )));
+        }
+        let next_input = if index + 1 == self.stages.len() {
+            record.checkpoint.next_input.clone()
+        } else {
+            handoff(&stage.name, &message)
+                .map_err(|reason| failure(PipelineFailure::InvalidHandoff(reason)))?
+        };
+        let mut checkpoint = record.checkpoint;
+        checkpoint.completed.push(PipelineStep {
+            step: index + 1,
+            agent_name: stage.name.clone(),
+            message,
+        });
+        checkpoint.next_input = next_input;
+        checkpoint.status = if index + 1 == self.stages.len() {
+            PipelineCheckpointStatus::Finished
+        } else {
+            PipelineCheckpointStatus::Ready
+        };
+        store
+            .save(key, Some(expected_revision), checkpoint)
+            .await
+            .map_err(|error| failure(PipelineFailure::Store(error.to_string())))
+    }
+
+    fn validate_checkpoint(
+        &self,
+        checkpoint: &PipelineCheckpoint,
+        status: PipelineCheckpointStatus,
+    ) -> Result<(), PipelineError> {
         let names: Vec<_> = self.stages.iter().map(|stage| stage.name.clone()).collect();
         let valid = checkpoint.version == PIPELINE_CHECKPOINT_VERSION
             && checkpoint.agent_names == names
-            && checkpoint.status == PipelineCheckpointStatus::Ready
+            && checkpoint.status == status
             && checkpoint.completed.len() < self.stages.len()
             && checkpoint
                 .completed
@@ -390,8 +484,15 @@ impl SequentialPipeline {
                 .enumerate()
                 .all(|(index, step)| step.step == index + 1 && step.agent_name == names[index]);
         if !valid {
-            return Err(checkpoint_error(None, None, checkpoint.completed.clone(),
-                PipelineFailure::UnsafeResume("checkpoint is in flight, finished, corrupt, or configured for another pipeline".into())));
+            return Err(checkpoint_error(
+                None,
+                None,
+                checkpoint.completed.clone(),
+                PipelineFailure::UnsafeResume(
+                    "checkpoint status, structure, version, or pipeline configuration is invalid"
+                        .into(),
+                ),
+            ));
         }
         Ok(())
     }

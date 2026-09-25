@@ -1,7 +1,8 @@
 use agentscope::{
     AgentInterruptHandle, ChatResponse, ContentBlock, InMemoryMemory, MockChatModel, Msg,
     PipelineCheckpoint, PipelineCheckpointStatus, PipelineFailure, PipelineRecord, PipelineStore,
-    PipelineStoreFuture, ReActAgent, SequentialPipeline, StateKey, ToolExecutor, ToolRegistry,
+    PipelineStoreFuture, ReActAgent, Role, SequentialPipeline, StateKey, ToolExecutor,
+    ToolRegistry,
 };
 use agentscope_state_sqlite::SQLitePipelineStore;
 use std::sync::Arc;
@@ -174,6 +175,106 @@ async fn sqlite_pipeline_checkpoint_keeps_inflight_on_failure() {
     let retry = pipeline(MockChatModel::new("unused"));
     assert!(matches!(
         retry.resume_checkpointed(&reopened, key).await,
+        Err(agentscope::PipelineError {
+            cause: PipelineFailure::UnsafeResume(_),
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn sqlite_reconciles_inflight_after_reopen_then_resumes_next_stage() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("pipeline.db");
+    let key = StateKey::new("user", "reconcile-after-reopen").unwrap();
+    let store = SQLitePipelineStore::open(&path).await.unwrap();
+    let failed = Arc::new(
+        ReActAgent::new(
+            "worker",
+            MockChatModel::new("failed").with_error(agentscope::ModelError::new("outcome unknown")),
+            ToolExecutor::new(ToolRegistry::new()),
+        )
+        .unwrap()
+        .with_memory(InMemoryMemory::new()),
+    );
+    let never_called = Arc::new(MockChatModel::new("next-never-called"));
+    let next = Arc::new(
+        ReActAgent::from_shared(
+            "next",
+            never_called.clone(),
+            ToolExecutor::new(ToolRegistry::new()),
+        )
+        .unwrap()
+        .with_memory(InMemoryMemory::new()),
+    );
+    let original = SequentialPipeline::new(vec![failed, next]).unwrap();
+    original
+        .run_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap_err();
+    assert!(never_called.recorded_requests().is_empty());
+    drop(store);
+
+    let reopened = SQLitePipelineStore::open(&path).await.unwrap();
+    let inflight = reopened.load(&key).await.unwrap().unwrap();
+    assert_eq!(
+        inflight.checkpoint.status,
+        PipelineCheckpointStatus::InFlight
+    );
+    let resumed_worker = Arc::new(MockChatModel::new("must-not-replay"));
+    let resumed_next = Arc::new(
+        MockChatModel::new("next")
+            .with_response(ChatResponse::completed([ContentBlock::from("done")])),
+    );
+    let restarted = SequentialPipeline::new(vec![
+        Arc::new(
+            ReActAgent::from_shared(
+                "worker",
+                resumed_worker.clone(),
+                ToolExecutor::new(ToolRegistry::new()),
+            )
+            .unwrap()
+            .with_memory(InMemoryMemory::new()),
+        ),
+        Arc::new(
+            ReActAgent::from_shared(
+                "next",
+                resumed_next.clone(),
+                ToolExecutor::new(ToolRegistry::new()),
+            )
+            .unwrap()
+            .with_memory(InMemoryMemory::new()),
+        ),
+    ])
+    .unwrap();
+    let verified = Msg::new("worker", Role::Assistant, [ContentBlock::from("verified")]);
+    let ready = restarted
+        .reconcile_checkpointed(&reopened, key.clone(), inflight.revision, verified.clone())
+        .await
+        .unwrap();
+    assert_eq!(ready.checkpoint.status, PipelineCheckpointStatus::Ready);
+    assert!(resumed_worker.recorded_requests().is_empty());
+    assert!(resumed_next.recorded_requests().is_empty());
+    drop(reopened);
+
+    let reopened_again = SQLitePipelineStore::open(&path).await.unwrap();
+    let output = restarted
+        .resume_checkpointed(&reopened_again, key.clone())
+        .await
+        .unwrap();
+    assert_eq!(output.steps[0].message, verified);
+    assert_eq!(output.message.text_content("").as_deref(), Some("done"));
+    assert!(resumed_worker.recorded_requests().is_empty());
+    assert_eq!(resumed_next.recorded_requests().len(), 1);
+    assert!(matches!(
+        restarted
+            .reconcile_checkpointed(
+                &reopened_again,
+                key,
+                inflight.revision,
+                Msg::new("worker", Role::Assistant, [ContentBlock::from("duplicate")]),
+            )
+            .await,
         Err(agentscope::PipelineError {
             cause: PipelineFailure::UnsafeResume(_),
             ..

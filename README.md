@@ -597,6 +597,17 @@ agent still needs its own durable state store/key where applicable; the pipeline
 checkpoint does not snapshot agent memory, resume tool approvals, or make agent
 and pipeline writes atomic. This first recovery API is non-streaming only.
 
+After independently verifying an `InFlight` stage's actual final reply and
+reconciling its agent/tool state, call
+`pipeline.reconcile_checkpointed(&store, key, record.revision, verified_reply).await?`.
+The reply must be an Assistant message named for the active agent; that identity
+check is **not proof** of the external outcome. The method only commits the
+verified reply using compare-and-swap. It never calls an agent or dispatches the
+next stage. Call `resume_checkpointed` separately when the resulting checkpoint
+is `Ready`; for a final-stage reconciliation, read
+`record.checkpoint.finished_output()`. A stale revision, invalid handoff, or
+repeated reconciliation leaves the checkpoint unchanged.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -681,7 +692,8 @@ after they have been exercised by working examples.
 - [x] Provide an interactive single-agent CLI with durable session recovery
 - [x] Minimal sequential pipeline with non-streaming and streaming writer/reviewer examples
 - [x] Revisioned SQLite pipeline checkpoints and safe stage-boundary resume (non-streaming)
-- [ ] In-flight reconciliation, checkpointed streaming, parallel/routed execution and delegation
+- [x] Explicit, revision-checked in-flight stage-result reconciliation
+- [ ] Checkpointed streaming, parallel/routed execution and delegation
 
 ### Storage Plugins
 
