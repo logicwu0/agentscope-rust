@@ -3,6 +3,7 @@
 mod checkpoint;
 mod error;
 mod event;
+mod streaming_checkpoint;
 pub use checkpoint::{
     InMemoryPipelineStore, PIPELINE_CHECKPOINT_VERSION, PipelineCheckpoint,
     PipelineCheckpointStatus, PipelineRecord, PipelineStore, PipelineStoreError,
@@ -49,8 +50,9 @@ pub type PipelineFuture<'a> =
 /// values so already emitted stage events remain available to the caller.
 pub type PipelineEventStream<'a> = Pin<Box<dyn Stream<Item = PipelineEvent> + Send + 'a>>;
 
-/// Lazy preparation of a pipeline stream. Only an overlapping-run `Busy` error
-/// is returned before a stream exists; agents start when the stream is polled.
+/// Lazy preparation of a pipeline stream. Agents start only when the stream is
+/// polled. Plain [`SequentialPipeline::stream`] returns only `Busy` here;
+/// checkpointed variants can also return store or validation failures.
 pub type PipelineStreamFuture<'a> =
     Pin<Box<dyn Future<Output = Result<PipelineEventStream<'a>, PipelineError>> + Send + 'a>>;
 

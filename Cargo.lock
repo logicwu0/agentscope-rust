@@ -81,6 +81,7 @@ name = "agentscope-state-sqlite"
 version = "0.1.0"
 dependencies = [
  "agentscope-rust",
+ "futures-util",
  "serde_json",
  "tempfile",
  "tokio",

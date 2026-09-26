@@ -488,7 +488,15 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 `Ready` 可自动继续；`InFlight` 阶段可能已经产生副作用，必须先人工核对，不能自动重试。
 已完成的运行也不能恢复；新运行需要新 key。各 Agent 如需持久化，仍须单独配置状态存储
 与 key；Pipeline 检查点不会保存 Agent 记忆、自动续接工具确认，Agent 与 Pipeline 的写入
-也不构成原子事务。当前检查点恢复仅支持非流式调用。
+也不构成原子事务。
+
+事件流使用同样的安全约束：通过 `stream_checkpointed(&store, key, input)` 创建，通过
+`resume_checkpointed_stream(&store, key)` 从已提交边界恢复。等待创建会先提交初始
+`Ready`，但不会调用 Agent；轮询时先提交 `InFlight` 再发 `StageStarted`，完成边界写入
+成功后才发 `StageCompleted`。首次轮询前丢弃会保留 `Ready`；阶段开始后丢弃、中断、
+等待确认或失败都会保留 `InFlight`，等待显式核对。Agent 的 `Finished` 事件可能早于边界
+写入；若写入失败，事件流以 Pipeline `Error` 结束，不会发 `StageCompleted` 或 Pipeline
+`Finished`。
 
 在外部独立核实 `InFlight` 阶段的真实最终回复，并核对相应 Agent/工具状态后，可调用
 `pipeline.reconcile_checkpointed(&store, key, record.revision, verified_reply).await?`。
@@ -581,7 +589,8 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 - [x] 最小顺序 Pipeline 与非流式/流式起草审核双 Agent 示例
 - [x] 带 revision 的 SQLite Pipeline 检查点与安全阶段边界恢复（非流式）
 - [x] 显式提交已核实的执行中阶段结果，并用 revision 防止重复提交
-- [ ] 带检查点的流式执行、并行/路由与任务委派
+- [x] 带检查点的流式执行与从已提交阶段边界安全恢复
+- [ ] 并行/路由执行与任务委派
 
 ### 存储插件
 

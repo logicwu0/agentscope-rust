@@ -1077,3 +1077,181 @@ async fn reconciliation_rejects_stale_or_invalid_evidence_without_mutation() {
         assert_eq!(store.load(&key).await.unwrap().unwrap(), before);
     }
 }
+
+#[tokio::test]
+async fn checkpointed_stream_commits_boundaries_before_reporting_them() {
+    let writer = stream_model("draft");
+    let reviewer = stream_model("reviewed");
+    let pipeline = SequentialPipeline::new(vec![
+        agent("writer", writer.clone()),
+        agent("reviewer", reviewer.clone()),
+    ])
+    .unwrap();
+    let store = InMemoryPipelineStore::new();
+    let key = StateKey::new("user", "checkpoint-stream").unwrap();
+    let mut events = pipeline
+        .stream_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap();
+    let initial = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(initial.revision, 1);
+    assert_eq!(initial.checkpoint.status, PipelineCheckpointStatus::Ready);
+    assert!(writer.recorded_requests().is_empty());
+
+    assert!(matches!(
+        events.next().await,
+        Some(PipelineEvent::StageStarted {
+            pipeline_step: 1,
+            ..
+        })
+    ));
+    let inflight = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(inflight.revision, 2);
+    assert_eq!(
+        inflight.checkpoint.status,
+        PipelineCheckpointStatus::InFlight
+    );
+    assert!(writer.recorded_requests().is_empty());
+    loop {
+        if matches!(
+            events.next().await,
+            Some(PipelineEvent::StageCompleted { .. })
+        ) {
+            break;
+        }
+    }
+    let ready = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(ready.revision, 3);
+    assert_eq!(ready.checkpoint.status, PipelineCheckpointStatus::Ready);
+    assert_eq!(ready.checkpoint.completed.len(), 1);
+    assert!(reviewer.recorded_requests().is_empty());
+
+    let remaining = events.collect::<Vec<_>>().await;
+    let Some(PipelineEvent::Finished { output }) = remaining.last() else {
+        panic!("expected terminal pipeline output")
+    };
+    assert_eq!(output.steps.len(), 2);
+    let finished = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(finished.revision, 5);
+    assert_eq!(
+        finished.checkpoint.status,
+        PipelineCheckpointStatus::Finished
+    );
+    assert_eq!(finished.checkpoint.finished_output().as_ref(), Some(output));
+}
+
+#[tokio::test]
+async fn dropping_checkpointed_stream_after_stage_start_leaves_inflight() {
+    let model = stream_model("must not be polled");
+    let pipeline = SequentialPipeline::new(vec![agent("worker", model.clone())]).unwrap();
+    let store = InMemoryPipelineStore::new();
+    let key = StateKey::new("user", "dropped-stream").unwrap();
+    let events = pipeline
+        .stream_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap();
+    drop(events);
+    let ready = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(ready.revision, 1);
+    assert_eq!(ready.checkpoint.status, PipelineCheckpointStatus::Ready);
+    assert!(model.recorded_requests().is_empty());
+
+    let mut events = pipeline
+        .resume_checkpointed_stream(&store, key.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        events.next().await,
+        Some(PipelineEvent::StageStarted { .. })
+    ));
+    assert!(model.recorded_requests().is_empty());
+    drop(events);
+
+    let record = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(record.checkpoint.status, PipelineCheckpointStatus::InFlight);
+    assert!(matches!(
+        pipeline.resume_checkpointed_stream(&store, key).await,
+        Err(PipelineError {
+            cause: PipelineFailure::UnsafeResume(_),
+            ..
+        })
+    ));
+    assert!(model.recorded_requests().is_empty());
+}
+
+#[tokio::test]
+async fn checkpointed_stream_resumes_ready_boundary_without_replaying() {
+    let writer = model("draft");
+    let reviewer = stream_model("reviewed");
+    let pipeline = SequentialPipeline::new(vec![
+        agent("writer", writer.clone()),
+        agent("reviewer", reviewer.clone()),
+    ])
+    .unwrap();
+    let store = InterruptAtBoundary {
+        inner: InMemoryPipelineStore::new(),
+        handle: pipeline.interrupt_handle(),
+    };
+    let key = StateKey::new("user", "resume-stream").unwrap();
+    pipeline
+        .run_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap_err();
+    let mut events = pipeline
+        .resume_checkpointed_stream(&store, key.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        events.next().await,
+        Some(PipelineEvent::StageStarted {
+            pipeline_step: 2,
+            ..
+        })
+    ));
+    let all = events.collect::<Vec<_>>().await;
+    assert!(matches!(all.last(), Some(PipelineEvent::Finished { .. })));
+    assert_eq!(writer.recorded_requests().len(), 1);
+    assert_eq!(reviewer.recorded_requests().len(), 1);
+    assert_eq!(
+        store.load(&key).await.unwrap().unwrap().checkpoint.status,
+        PipelineCheckpointStatus::Finished
+    );
+}
+
+#[tokio::test]
+async fn checkpointed_stream_does_not_report_uncommitted_completion() {
+    let model = stream_model("finished agent reply");
+    let pipeline = SequentialPipeline::new(vec![agent("worker", model.clone())]).unwrap();
+    let store = RejectCompletion(InMemoryPipelineStore::new());
+    let key = StateKey::new("user", "stream-save-failure").unwrap();
+    let events = pipeline
+        .stream_checkpointed(&store, key.clone(), Msg::user("task"))
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        PipelineEvent::Agent {
+            event: AgentEvent::Finished { .. },
+            ..
+        }
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        PipelineEvent::StageCompleted { .. } | PipelineEvent::Finished { .. }
+    )));
+    assert!(matches!(
+        events.last(),
+        Some(PipelineEvent::Error {
+            error: PipelineError {
+                cause: PipelineFailure::Store(_),
+                ..
+            }
+        })
+    ));
+    assert_eq!(
+        store.load(&key).await.unwrap().unwrap().checkpoint.status,
+        PipelineCheckpointStatus::InFlight
+    );
+}

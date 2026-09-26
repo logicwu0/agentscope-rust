@@ -595,7 +595,18 @@ its reply and next handoff are complete. After a crash, only `Ready` can resume;
 effects. A finished run also cannot be resumed. A new run needs a new key. Each
 agent still needs its own durable state store/key where applicable; the pipeline
 checkpoint does not snapshot agent memory, resume tool approvals, or make agent
-and pipeline writes atomic. This first recovery API is non-streaming only.
+and pipeline writes atomic.
+
+The same contract is available for event streams with
+`stream_checkpointed(&store, key, input)` and
+`resume_checkpointed_stream(&store, key)`. Awaiting creation commits the initial
+`Ready` record but does not invoke an agent. Polling commits `InFlight` before
+emitting `StageStarted`; a completed boundary is committed before
+`StageCompleted`. Dropping before the first poll leaves `Ready`, while dropping,
+interrupting, confirmation, or failure after a stage starts leaves `InFlight` for
+explicit reconciliation. An agent `Finished` event can precede the boundary
+write; if that write fails, the stream ends with pipeline `Error` and never emits
+`StageCompleted` or pipeline `Finished`.
 
 After independently verifying an `InFlight` stage's actual final reply and
 reconciling its agent/tool state, call
@@ -693,7 +704,8 @@ after they have been exercised by working examples.
 - [x] Minimal sequential pipeline with non-streaming and streaming writer/reviewer examples
 - [x] Revisioned SQLite pipeline checkpoints and safe stage-boundary resume (non-streaming)
 - [x] Explicit, revision-checked in-flight stage-result reconciliation
-- [ ] Checkpointed streaming, parallel/routed execution and delegation
+- [x] Checkpointed streaming and safe resume from committed stage boundaries
+- [ ] Parallel/routed execution and delegation
 
 ### Storage Plugins
 
