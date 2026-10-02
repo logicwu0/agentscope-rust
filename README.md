@@ -619,6 +619,44 @@ is `Ready`; for a final-stage reconciliation, read
 `record.checkpoint.finished_output()`. A stale revision, invalid handoff, or
 repeated reconciliation leaves the checkpoint unchanged.
 
+### Bounded parallel multi-agent pipeline
+
+`ParallelPipeline` sends an identical clone of the input to each independent agent
+and limits concurrent replies:
+
+```rust
+let pipeline = agentscope::ParallelPipeline::new(vec![
+    std::sync::Arc::new(security_analyst),
+    std::sync::Arc::new(reliability_analyst),
+], 2)?;
+let output = pipeline.run(agentscope::Msg::user("Analyze this service design")).await?;
+```
+
+The list must be nonempty with unique nonblank names, and the concurrency limit
+must be positive. `ParallelOutput::branches` preserves configuration order, with
+one-based branch numbers, agent names and `Completed(Msg)` outcomes. One agent's
+failure does not stop other active or queued branches. The run then returns
+`ParallelError` with `AgentFailures` and every branch's ordered outcome; each
+`Failed` retains the original `AgentError`, including confirmation or uncertain
+tool-execution state.
+
+The interrupt handle stops dispatch and drops active reply futures. The error
+preserves observed completed/failed results, marks invoked unfinished branches
+`Interrupted`, and marks undispatched branches `NotStarted`. Dropping the run also
+cancels its active futures, but returns no result. Neither action rolls back
+side effects or memory changes. Runs on the pipeline and its clones share a
+`Busy` guard; do not concurrently use the same agents elsewhere. Supply separate
+Memory instances and distinct durable StateKeys; the pipeline does not merge or
+reset their histories.
+
+There is no aggregate final message. To summarize, explicitly construct a new
+User message from the original question and selected visible branch text, then
+call a separate summary agent. Original replies can contain private thinking,
+metadata or usage and should not be forwarded wholesale or logged publicly.
+Parallel streaming, checkpoints and resume remain TODO. Run the offline
+three-analyst and explicit-summary example with
+`cargo run --example parallel_pipeline`.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -705,7 +743,9 @@ after they have been exercised by working examples.
 - [x] Revisioned SQLite pipeline checkpoints and safe stage-boundary resume (non-streaming)
 - [x] Explicit, revision-checked in-flight stage-result reconciliation
 - [x] Checkpointed streaming and safe resume from committed stage boundaries
-- [ ] Parallel/routed execution and delegation
+- [x] Bounded non-streaming parallel execution with ordered outcomes and explicit summary example
+- [ ] Parallel streaming events and durable checkpoints/resume
+- [ ] Routed execution and delegation
 
 ### Storage Plugins
 

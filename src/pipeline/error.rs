@@ -7,8 +7,12 @@ use std::fmt;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PipelineConfigError {
     Empty,
-    EmptyName { step: usize },
+    EmptyName {
+        step: usize,
+    },
     DuplicateName(String),
+    /// The parallel execution limit must be positive.
+    ZeroConcurrency,
 }
 
 impl fmt::Display for PipelineConfigError {
@@ -17,6 +21,7 @@ impl fmt::Display for PipelineConfigError {
             Self::Empty => f.write_str("pipeline requires at least one agent"),
             Self::EmptyName { step } => write!(f, "pipeline stage {step} has a blank agent name"),
             Self::DuplicateName(name) => write!(f, "pipeline agent name {name:?} is duplicated"),
+            Self::ZeroConcurrency => f.write_str("pipeline concurrency must be greater than zero"),
         }
     }
 }

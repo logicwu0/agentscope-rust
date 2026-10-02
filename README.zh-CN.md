@@ -505,6 +505,36 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 若新检查点为 `Ready`，再显式调用 `resume_checkpointed`；若是最后阶段，可读取
 `record.checkpoint.finished_output()`。旧 revision、无效交接或重复核对不会修改检查点。
 
+### 有并发上限的多 Agent Pipeline
+
+`ParallelPipeline` 把同一份输入完整克隆给各个独立 Agent，并限制同时执行的回复数：
+
+```rust
+let pipeline = agentscope::ParallelPipeline::new(vec![
+    std::sync::Arc::new(security_analyst),
+    std::sync::Arc::new(reliability_analyst),
+], 2)?;
+let output = pipeline.run(agentscope::Msg::user("请分析这份服务设计")).await?;
+```
+
+列表必须非空，Agent 名称不可为空或重复，并发上限必须大于零。
+`ParallelOutput::branches` 按配置顺序返回一基分支编号、Agent 名称和 `Completed(Msg)`。
+某个 Agent 失败后，其他活动分支和排队分支仍继续执行；最终返回含 `AgentFailures`
+原因的 `ParallelError`，保留所有分支的有序结果。`Failed` 保存原始 `AgentError`，
+包括工具待确认或执行结果不确定等状态。
+
+中断句柄会停止调度并丢弃活动 reply future。错误保留已经观察到的成功和失败结果，
+已调用但未完成的分支标记为 `Interrupted`，尚未调度的分支标记为 `NotStarted`。
+直接丢弃运行 future 也会取消活动 future，但没有返回结果；已产生的副作用和记忆修改
+不回滚。同一 Pipeline 及其克隆共享 `Busy` 运行保护，不要同时在其他地方使用这些
+Agent。每个 Agent 应使用独立 Memory 与不同持久化 `StateKey`，Pipeline 不合并或
+清空它们的历史。
+
+结果不包含自动汇总的最终消息。需要汇总时，由调用方把原始问题与选取的分支公开文本
+组成新的 `User` 消息，再显式调用独立的汇总 Agent。原始回复可能包含私有思考、元数据
+或 Token 用量，不应整体转发或直接公开记录。并行流式事件、检查点与恢复仍在 TODO。
+三个角度分析后显式汇总的离线示例：`cargo run --example parallel_pipeline`。
+
 ## 路线图 / TODO
 
 项目将采用渐进式开发。只有经过可运行示例验证的接口，才会逐步进入稳定状态。
@@ -590,7 +620,9 @@ Agent 名称、失败原因及已完成输出；确认和“不确定执行”�
 - [x] 带 revision 的 SQLite Pipeline 检查点与安全阶段边界恢复（非流式）
 - [x] 显式提交已核实的执行中阶段结果，并用 revision 防止重复提交
 - [x] 带检查点的流式执行与从已提交阶段边界安全恢复
-- [ ] 并行/路由执行与任务委派
+- [x] 有并发上限的非流式并行执行、有序分支结果与显式汇总示例
+- [ ] 并行流式事件与持久化检查点/恢复
+- [ ] 路由执行与任务委派
 
 ### 存储插件
 

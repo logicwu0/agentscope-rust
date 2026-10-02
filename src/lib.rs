@@ -11,11 +11,12 @@ pub mod pipeline;
 pub mod tool;
 
 pub use pipeline::{
-    InMemoryPipelineStore, PIPELINE_CHECKPOINT_VERSION, PipelineCheckpoint,
-    PipelineCheckpointStatus, PipelineConfigError, PipelineError, PipelineEvent,
-    PipelineEventStream, PipelineFailure, PipelineFuture, PipelineOutput, PipelineRecord,
-    PipelineStep, PipelineStore, PipelineStoreError, PipelineStoreFuture, PipelineStreamFuture,
-    SequentialPipeline,
+    InMemoryPipelineStore, PIPELINE_CHECKPOINT_VERSION, ParallelBranchOutcome,
+    ParallelBranchResult, ParallelError, ParallelFailure, ParallelFuture, ParallelOutput,
+    ParallelPipeline, PipelineCheckpoint, PipelineCheckpointStatus, PipelineConfigError,
+    PipelineError, PipelineEvent, PipelineEventStream, PipelineFailure, PipelineFuture,
+    PipelineOutput, PipelineRecord, PipelineStep, PipelineStore, PipelineStoreError,
+    PipelineStoreFuture, PipelineStreamFuture, SequentialPipeline,
 };
 
 pub use agent::{

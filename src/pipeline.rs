@@ -1,8 +1,9 @@
-//! Minimal sequential agent orchestration. No shared memory or automatic replay.
+//! Sequential and bounded parallel agent orchestration.
 
 mod checkpoint;
 mod error;
 mod event;
+mod parallel;
 mod streaming_checkpoint;
 pub use checkpoint::{
     InMemoryPipelineStore, PIPELINE_CHECKPOINT_VERSION, PipelineCheckpoint,
@@ -11,6 +12,10 @@ pub use checkpoint::{
 };
 pub use error::{PipelineConfigError, PipelineError, PipelineFailure};
 pub use event::PipelineEvent;
+pub use parallel::{
+    ParallelBranchOutcome, ParallelBranchResult, ParallelError, ParallelFailure, ParallelFuture,
+    ParallelOutput, ParallelPipeline,
+};
 
 use crate::{
     Agent, AgentError, AgentEvent, AgentInterruptHandle, ContentBlock, Msg, Role, StateKey,
@@ -61,6 +66,25 @@ struct Stage {
     agent: Arc<dyn Agent>,
 }
 
+fn stages(agents: Vec<Arc<dyn Agent>>) -> Result<Vec<Stage>, PipelineConfigError> {
+    if agents.is_empty() {
+        return Err(PipelineConfigError::Empty);
+    }
+    let mut names = BTreeSet::new();
+    let mut stages = Vec::with_capacity(agents.len());
+    for (index, agent) in agents.into_iter().enumerate() {
+        let name = agent.name().to_owned();
+        if name.trim().is_empty() {
+            return Err(PipelineConfigError::EmptyName { step: index + 1 });
+        }
+        if !names.insert(name.clone()) {
+            return Err(PipelineConfigError::DuplicateName(name));
+        }
+        stages.push(Stage { name, agent });
+    }
+    Ok(stages)
+}
+
 /// Runs each agent once in order, forwarding only visible text as new user input.
 ///
 /// This is an orchestrator, not an `Agent`: no combined history, state store or
@@ -80,23 +104,8 @@ impl SequentialPipeline {
     /// # Errors
     /// Rejects an empty list or blank/duplicate names. Does not invoke agents.
     pub fn new(agents: Vec<Arc<dyn Agent>>) -> Result<Self, PipelineConfigError> {
-        if agents.is_empty() {
-            return Err(PipelineConfigError::Empty);
-        }
-        let mut names = BTreeSet::new();
-        let mut stages = Vec::with_capacity(agents.len());
-        for (index, agent) in agents.into_iter().enumerate() {
-            let name = agent.name().to_owned();
-            if name.trim().is_empty() {
-                return Err(PipelineConfigError::EmptyName { step: index + 1 });
-            }
-            if !names.insert(name.clone()) {
-                return Err(PipelineConfigError::DuplicateName(name));
-            }
-            stages.push(Stage { name, agent });
-        }
         Ok(Self {
-            stages: Arc::new(stages),
+            stages: Arc::new(stages(agents)?),
             operation: Arc::new(Mutex::new(())),
             interrupt: AgentInterruptHandle::new(),
         })
