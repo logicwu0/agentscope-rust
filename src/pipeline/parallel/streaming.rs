@@ -18,18 +18,19 @@ use std::{
 /// Interleaved parallel events. Runtime failures are terminal event values.
 pub type ParallelEventStream<'a> = Pin<Box<dyn Stream<Item = ParallelEvent> + Send + 'a>>;
 
-/// Lazy stream preparation; only a conflicting active run returns an error here.
+/// Lazy stream preparation. Checkpointed variants also create or validate stored
+/// progress here; execution failures become terminal events after preparation.
 pub type ParallelStreamFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ParallelEventStream<'a>, ParallelError>> + Send + 'a>>;
 
-enum BranchItem {
+pub(super) enum BranchItem {
     Started,
     Agent(AgentEvent),
     Finished(ParallelBranchOutcome),
 }
 
-struct BranchStream<'a> {
-    index: usize,
+pub(super) struct BranchStream<'a> {
+    pub(super) index: usize,
     events: Pin<Box<dyn Stream<Item = BranchItem> + Send + 'a>>,
 }
 
@@ -151,7 +152,7 @@ impl ParallelPipeline {
     }
 }
 
-fn branch_stream<'a>(
+pub(super) fn branch_stream<'a>(
     index: usize,
     stage: &'a Stage,
     input: Msg,
@@ -229,7 +230,7 @@ fn terminal_outcome(event: &AgentEvent) -> Option<ParallelBranchOutcome> {
     }
 }
 
-fn failed_stream() -> ParallelBranchOutcome {
+pub(super) fn failed_stream() -> ParallelBranchOutcome {
     ParallelBranchOutcome::Failed(Box::new(AgentError::InvalidModelResponse(
         "agent stream ended without a terminal event".into(),
     )))

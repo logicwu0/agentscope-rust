@@ -4,8 +4,7 @@ use super::super::{
     ParallelError, ParallelFailure, ParallelFuture, ParallelOutput, ParallelPipeline, branch_reply,
 };
 use super::{
-    PARALLEL_CHECKPOINT_VERSION, ParallelBranchCheckpoint, ParallelCheckpoint, ParallelRecord,
-    ParallelStore, checkpoint_error, load_record,
+    ParallelBranchCheckpoint, ParallelRecord, ParallelStore, checkpoint_error, load_record,
 };
 use crate::{Msg, StateKey, agent::AgentInterruptToken};
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -31,20 +30,7 @@ impl ParallelPipeline {
                 .try_lock()
                 .map_err(|_| checkpoint_error(None, ParallelFailure::Busy))?;
             let interrupt = self.interrupt.token();
-            let checkpoint = ParallelCheckpoint {
-                version: PARALLEL_CHECKPOINT_VERSION,
-                agent_names: self
-                    .branches
-                    .iter()
-                    .map(|stage| stage.name.clone())
-                    .collect(),
-                input,
-                branches: self
-                    .branches
-                    .iter()
-                    .map(|_| ParallelBranchCheckpoint::Ready)
-                    .collect(),
-            };
+            let checkpoint = self.new_checkpoint(input);
             let record = store
                 .save(key.clone(), None, checkpoint)
                 .await
@@ -59,7 +45,7 @@ impl ParallelPipeline {
     /// Resumes only undispatched `Ready` branches, with the original input.
     /// Completed and failed branches are skipped. Any `InFlight` branch blocks
     /// the entire resume until explicitly reconciled; terminal records are read
-    /// using [`ParallelCheckpoint::finished_result`] instead of replayed.
+    /// using [`super::ParallelCheckpoint::finished_result`] instead of replayed.
     /// This does not approve tools, retry failures or restore agent state itself.
     /// # Errors
     /// Busy, storage failure, missing/incompatible/unsafe progress, interruption,
@@ -77,22 +63,7 @@ impl ParallelPipeline {
                 .map_err(|_| checkpoint_error(None, ParallelFailure::Busy))?;
             let interrupt = self.interrupt.token();
             let record = load_record(store, &key).await?;
-            self.validate_checkpoint(&record)?;
-            if record
-                .checkpoint
-                .branches
-                .iter()
-                .any(|branch| matches!(branch, ParallelBranchCheckpoint::InFlight))
-                || !record
-                    .checkpoint
-                    .branches
-                    .iter()
-                    .any(|branch| matches!(branch, ParallelBranchCheckpoint::Ready))
-            {
-                return Err(checkpoint_error(Some(&record.checkpoint), ParallelFailure::UnsafeResume(
-                    "in-flight branches require reconciliation; terminal progress cannot be replayed".into(),
-                )));
-            }
+            self.validate_resume(&record)?;
             self.execute_checkpointed(store, key, record, interrupt)
                 .await
         })

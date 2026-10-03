@@ -2,6 +2,7 @@
 
 mod execution;
 mod reconciliation;
+mod streaming;
 
 use super::{
     ParallelBranchOutcome, ParallelBranchResult, ParallelError, ParallelFailure, ParallelOutput,
@@ -191,6 +192,43 @@ impl ParallelStore for InMemoryParallelStore {
 }
 
 impl ParallelPipeline {
+    fn new_checkpoint(&self, input: Msg) -> ParallelCheckpoint {
+        ParallelCheckpoint {
+            version: PARALLEL_CHECKPOINT_VERSION,
+            agent_names: self
+                .branches
+                .iter()
+                .map(|stage| stage.name.clone())
+                .collect(),
+            input,
+            branches: self
+                .branches
+                .iter()
+                .map(|_| ParallelBranchCheckpoint::Ready)
+                .collect(),
+        }
+    }
+
+    fn validate_resume(&self, record: &ParallelRecord) -> Result<(), ParallelError> {
+        self.validate_checkpoint(record)?;
+        if record
+            .checkpoint
+            .branches
+            .iter()
+            .any(|branch| matches!(branch, ParallelBranchCheckpoint::InFlight))
+            || !record
+                .checkpoint
+                .branches
+                .iter()
+                .any(|branch| matches!(branch, ParallelBranchCheckpoint::Ready))
+        {
+            return Err(checkpoint_error(Some(&record.checkpoint), ParallelFailure::UnsafeResume(
+                "in-flight branches require reconciliation; terminal progress cannot be replayed".into(),
+            )));
+        }
+        Ok(())
+    }
+
     fn validate_checkpoint(&self, record: &ParallelRecord) -> Result<(), ParallelError> {
         if record.revision == 0
             || !record.checkpoint.valid_structure()

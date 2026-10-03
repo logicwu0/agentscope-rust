@@ -709,8 +709,31 @@ begun. Re-read the store after an ambiguous write result before deciding recover
 Pipeline and agent writes are not atomic together, and the checkpoint does not
 snapshot agent memory: configure each agent's own durable state and distinct key
 when needed. Checkpoints contain original inputs, replies and errors, potentially
-including private data. Parallel checkpointed streaming remains TODO. Offline
-committed-boundary resume demo: `cargo run --example parallel_pipeline_checkpoint`.
+including private data. Offline committed-boundary resume demo:
+`cargo run --example parallel_pipeline_checkpoint`.
+
+The same recovery contract is available for streams through
+`stream_checkpointed(&store, key, input)` and
+`resume_checkpointed_stream(&store, key)`. Awaiting `stream_checkpointed` reserves
+the shared run lock and commits an initial all-`Ready` record without invoking
+an agent.
+Polling commits a branch's `InFlight` marker before emitting `BranchStarted`.
+Original agent `Finished` or `Error` events only report an observed outcome;
+`BranchFinished` confirms that its `Completed` or `Failed` checkpoint write
+succeeded. A failed write emits terminal pipeline `Error` instead of acknowledging
+that branch. Final outcomes remain in configuration order, while active streams
+stay bounded and their events interleave. Checkpoint writes are serialized;
+there are no background tasks or unbounded event queues.
+
+Dropping a new stream before the first poll leaves the initial `Ready` record.
+Dropping, interrupting or a store failure after a branch is marked leaves unfinished work
+`InFlight`, including a selected branch whose agent was not yet invoked. Already
+committed outcomes remain intact. Resume only dispatches `Ready` branches and
+rejects any `InFlight` or all-terminal checkpoint; use the same explicit
+`reconcile_checkpointed` method before recovery when external verification is
+needed. Poll through the terminal event for agent state finalization. The offline
+streaming interruption/resume demo is
+`cargo run --example parallel_pipeline_checkpoint_stream`.
 
 ## Roadmap / TODO
 
@@ -801,7 +824,7 @@ after they have been exercised by working examples.
 - [x] Bounded non-streaming parallel execution with ordered outcomes and explicit summary example
 - [x] Bounded parallel streaming with branch-aware events and ordered terminal outcomes
 - [x] Non-streaming parallel checkpoints, SQLite persistence, safe resume and branch reconciliation
-- [ ] Parallel checkpointed streaming
+- [x] Parallel checkpointed streaming with committed branch outcomes and safe resume
 - [ ] Routed execution and delegation
 
 ### Storage Plugins

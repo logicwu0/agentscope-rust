@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ParallelEvent {
     /// A concurrency slot was assigned, before invoking the agent stream.
-    /// Interruption at this point can still leave the branch `NotStarted`.
+    /// A plain stream can still leave the branch `NotStarted` on interruption.
+    /// Checkpointed streams commit `InFlight` before emitting this event.
     BranchStarted {
         /// One-based configured branch, distinct from an agent's `ReAct` step.
         branch: usize,
@@ -29,6 +30,8 @@ pub enum ParallelEvent {
     },
     /// One branch produced a completed reply or failed; siblings still continue.
     /// Interrupted and unstarted branches are reported only in terminal `Error`.
+    /// In checkpointed streams this acknowledges a durable terminal commit;
+    /// an earlier agent-local terminal event alone does not.
     BranchFinished {
         /// Original branch outcome, including any structured agent error.
         result: ParallelBranchResult,
@@ -38,9 +41,10 @@ pub enum ParallelEvent {
         /// Original replies in configured branch order.
         output: ParallelOutput,
     },
-    /// Aggregate agent failures after all branches finish, or interruption.
+    /// Aggregate agent failures, interruption, or checkpoint storage failure.
     Error {
-        /// Observed results and interrupted/unstarted work, in configured order.
+        /// Outcomes in configured order. Checkpointed streams report only the
+        /// last acknowledged record, not uncommitted agent observations.
         error: ParallelError,
     },
 }

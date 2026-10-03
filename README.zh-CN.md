@@ -572,8 +572,23 @@ Agent 配置不兼容时拒绝恢复。新运行使用新 key；全部终态的�
 已提交的 `InFlight` 标记会保守地报告为 `Interrupted`，即使调用尚未开始。写入结果
 不确定时，应重新读取存储，再决定恢复方式。Pipeline 与 Agent 写入不构成原子事务，
 检查点也不保存 Agent 记忆；需要持久化时，各 Agent 仍需独立状态存储和不同 key。
-检查点包含原始输入、回复和错误，可能含私有数据。并行带检查点的流式执行仍在 TODO。
+检查点包含原始输入、回复和错误，可能含私有数据。
 已提交边界恢复的离线示例：`cargo run --example parallel_pipeline_checkpoint`。
+
+事件流通过 `stream_checkpointed(&store, key, input)` 和
+`resume_checkpointed_stream(&store, key)` 使用相同恢复约束。等待 `stream_checkpointed`
+会占用共享运行锁，提交初始全部为 `Ready` 的检查点，但不调用 Agent。轮询先提交分支的
+`InFlight`，再发出 `BranchStarted`。原始 Agent `Finished` 或 `Error` 仅表示观察到结果；
+`BranchFinished` 才确认该分支的 `Completed` 或 `Failed` 检查点已经成功写入。
+写入失败会发出 Pipeline 终止 `Error`，不会确认该分支完成。最终结果保持配置顺序，
+活动流仍遵守并发上限、事件可以交错；检查点写入串行进行，不启动后台任务或无界事件队列。
+
+新流首次轮询前丢弃保留初始 `Ready`。分支标记后丢弃、中断或存储失败会让未完成工作
+保持 `InFlight`，包括已选中但尚未调用 Agent 的分支；已提交结果继续保留。恢复仅
+启动 `Ready`，存在任一 `InFlight` 或检查点已全部终态时拒绝恢复。需要外部验证时，
+先通过已有 `reconcile_checkpointed` 显式核对，再恢复。应读取到终止事件，以完成
+Agent 状态保存。流式中断与恢复离线示例：
+`cargo run --example parallel_pipeline_checkpoint_stream`。
 
 ## 路线图 / TODO
 
@@ -663,7 +678,7 @@ Agent 配置不兼容时拒绝恢复。新运行使用新 key；全部终态的�
 - [x] 有并发上限的非流式并行执行、有序分支结果与显式汇总示例
 - [x] 有并发上限的并行流式执行、分支事件与有序终态结果
 - [x] 非流式并行检查点、SQLite 持久化、安全恢复与分支结果核对
-- [ ] 并行带检查点的流式执行
+- [x] 并行带检查点的流式执行、已提交分支结果与安全恢复
 - [ ] 路由执行与任务委派
 
 ### 存储插件
