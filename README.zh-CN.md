@@ -532,8 +532,24 @@ Agent。每个 Agent 应使用独立 Memory 与不同持久化 `StateKey`，Pipe
 
 结果不包含自动汇总的最终消息。需要汇总时，由调用方把原始问题与选取的分支公开文本
 组成新的 `User` 消息，再显式调用独立的汇总 Agent。原始回复可能包含私有思考、元数据
-或 Token 用量，不应整体转发或直接公开记录。并行流式事件、检查点与恢复仍在 TODO。
+或 Token 用量，不应整体转发或直接公开记录。
 三个角度分析后显式汇总的离线示例：`cargo run --example parallel_pipeline`。
+
+`pipeline.stream(input).await?` 与 `run` 及其克隆共享运行锁，返回惰性的 `ParallelEvent`
+流，此时不调用 Agent。轮询后发出 `BranchStarted`，随后以一基分支编号和 Agent 名称
+包装原始 `AgentEvent`，再发出包含 `Completed` 或 `Failed` 结果的 `BranchFinished`。
+Agent 内部步骤编号保持原样。中间事件按就绪顺序交错，仅保证每个分支内部的事件顺序；
+唯一终止事件为 `Finished` 或 `Error`，其中所有分支结果仍按配置顺序排列。
+
+活动 Agent 流遵守相同并发上限。Agent 错误或工具待确认会保留原始事件，并生成
+`Failed` 结果；其他活动分支与排队分支继续执行，全部结束后才返回聚合的
+`AgentFailures` 错误。`BranchStarted` 在调用 Agent 前宣告已选中分支，因此在该事件后
+立即中断时，分支仍可能标记为 `NotStarted`。其他中断行为与 `run` 相同：停止调度、
+丢弃活动流，保留已观察到的终态回复或错误，并区分未完成和未启动的分支。
+
+事件流不启动后台任务；不轮询就不启动工作，丢弃会释放运行锁，但不补发终止事件。
+需要 Agent 完成状态保存时，应读取到终止事件；已产生的副作用不回滚。并行持久化
+检查点与恢复仍在 TODO。离线流式示例：`cargo run --example parallel_pipeline_stream`。
 
 ## 路线图 / TODO
 
@@ -621,7 +637,8 @@ Agent。每个 Agent 应使用独立 Memory 与不同持久化 `StateKey`，Pipe
 - [x] 显式提交已核实的执行中阶段结果，并用 revision 防止重复提交
 - [x] 带检查点的流式执行与从已提交阶段边界安全恢复
 - [x] 有并发上限的非流式并行执行、有序分支结果与显式汇总示例
-- [ ] 并行流式事件与持久化检查点/恢复
+- [x] 有并发上限的并行流式执行、分支事件与有序终态结果
+- [ ] 并行持久化检查点/恢复
 - [ ] 路由执行与任务委派
 
 ### 存储插件

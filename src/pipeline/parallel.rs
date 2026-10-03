@@ -1,5 +1,11 @@
 //! Bounded fan-out with ordered branch outcomes and cooperative interruption.
 
+mod event;
+mod streaming;
+
+pub use event::ParallelEvent;
+pub use streaming::{ParallelEventStream, ParallelStreamFuture};
+
 use super::{PipelineConfigError, Stage, stages};
 use crate::{
     Agent, AgentError, AgentInterruptHandle, AgentResult, Msg, agent::AgentInterruptToken,
@@ -25,10 +31,11 @@ pub enum ParallelBranchOutcome {
     Completed(Msg),
     /// Agent failure, including pending confirmation or uncertain tool execution.
     Failed(Box<AgentError>),
-    /// Reply was invoked but no result was observed before pipeline interruption.
+    /// Reply or stream was invoked but no terminal result was observed before
+    /// pipeline interruption.
     /// External effects and agent state may still require reconciliation.
     Interrupted,
-    /// This branch's reply was never invoked.
+    /// This branch's reply or stream was never invoked.
     NotStarted,
 }
 
@@ -113,9 +120,9 @@ type BranchFuture<'a> =
 /// cannot be detected through `dyn Agent`. Avoid independent concurrent use of
 /// these same agents. Clones share the run lock and interrupt handle.
 ///
-/// This orchestrator has no streaming, combined memory, checkpoint or resume API.
-/// Every run is new work. Dropping its future stops dispatch and drops active
-/// reply futures without spawning background tasks or undoing external effects.
+/// This orchestrator has no combined memory, checkpoint or resume API. Every
+/// run/stream is new work. Dropping its future or stream stops dispatch and drops
+/// active agent operations without spawning tasks or undoing external effects.
 #[derive(Clone)]
 pub struct ParallelPipeline {
     branches: Arc<Vec<Stage>>,
@@ -144,8 +151,8 @@ impl ParallelPipeline {
         })
     }
 
-    /// Interrupts the active run; later runs capture a fresh signal baseline.
-    /// Drops active reply futures without calling individual agent handles.
+    /// Interrupts the active run/stream; later operations capture a fresh signal
+    /// baseline. Drops active agent operations without calling their handles.
     #[must_use]
     pub fn interrupt_handle(&self) -> AgentInterruptHandle {
         self.interrupt.clone()
@@ -246,7 +253,7 @@ fn branch_reply<'a>(
     stage: &'a Stage,
     input: Msg,
     started: &'a AtomicBool,
-    interrupt: AgentInterruptToken,
+    mut interrupt: AgentInterruptToken,
 ) -> BranchFuture<'a> {
     Box::pin(async move {
         // Another branch can synchronously trigger an interrupt while the
@@ -255,7 +262,12 @@ fn branch_reply<'a>(
             return (index, None);
         }
         started.store(true, Ordering::Relaxed);
-        (index, Some(stage.agent.reply(input).await))
+        let result = tokio::select! {
+            biased;
+            () = interrupt.cancelled() => None,
+            result = stage.agent.reply(input) => Some(result),
+        };
+        (index, result)
     })
 }
 

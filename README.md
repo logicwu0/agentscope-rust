@@ -653,9 +653,32 @@ There is no aggregate final message. To summarize, explicitly construct a new
 User message from the original question and selected visible branch text, then
 call a separate summary agent. Original replies can contain private thinking,
 metadata or usage and should not be forwarded wholesale or logged publicly.
-Parallel streaming, checkpoints and resume remain TODO. Run the offline
-three-analyst and explicit-summary example with
+Run the offline three-analyst and explicit-summary example with
 `cargo run --example parallel_pipeline`.
+
+`pipeline.stream(input).await?` reserves the same run lock as `run`, including
+across clones, and returns a lazy `ParallelEvent` stream without calling an agent.
+Polling emits `BranchStarted`, the branch's original `AgentEvent` values wrapped
+with its one-based branch number and name, then `BranchFinished` containing its
+`Completed` or `Failed` outcome. Agent-local step numbers remain unchanged.
+Intermediate events follow readiness order and can interleave; only each
+branch's event order is guaranteed. The sole terminal event is `Finished` or
+`Error`, with final branch results in configuration order.
+
+The same concurrency bound applies to active agent streams. Agent errors or
+tool-confirmation pauses preserve their original events and produce `Failed`
+outcomes; other active and queued branches continue before the aggregate
+`AgentFailures` error. `BranchStarted` announces selection before the agent is
+invoked, so an interruption immediately afterward can still leave that branch
+`NotStarted`. Otherwise interruption stops dispatch, drops live streams, and
+retains observed terminal replies/errors with the same branch outcome semantics
+as `run`.
+
+The stream has no background tasks: unpolled work does not start, and dropping it
+releases the run lock without emitting a terminal event. Poll through the terminal
+event when agent state finalization matters; side effects already performed are
+not rolled back. Parallel checkpoints and resume remain TODO. Offline streaming
+demo: `cargo run --example parallel_pipeline_stream`.
 
 ## Roadmap / TODO
 
@@ -744,7 +767,8 @@ after they have been exercised by working examples.
 - [x] Explicit, revision-checked in-flight stage-result reconciliation
 - [x] Checkpointed streaming and safe resume from committed stage boundaries
 - [x] Bounded non-streaming parallel execution with ordered outcomes and explicit summary example
-- [ ] Parallel streaming events and durable checkpoints/resume
+- [x] Bounded parallel streaming with branch-aware events and ordered terminal outcomes
+- [ ] Parallel durable checkpoints/resume
 - [ ] Routed execution and delegation
 
 ### Storage Plugins
