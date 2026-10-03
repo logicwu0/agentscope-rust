@@ -677,8 +677,40 @@ as `run`.
 The stream has no background tasks: unpolled work does not start, and dropping it
 releases the run lock without emitting a terminal event. Poll through the terminal
 event when agent state finalization matters; side effects already performed are
-not rolled back. Parallel checkpoints and resume remain TODO. Offline streaming
+not rolled back. Offline streaming
 demo: `cargo run --example parallel_pipeline_stream`.
+
+For explicit **non-streaming** recovery, use `run_checkpointed(&store, key, input)`
+and `resume_checkpointed(&store, key)`. `agentscope-state-sqlite::SQLiteParallelStore`
+persists versioned, revisioned branch checkpoints in a separate table;
+`InMemoryParallelStore` is process-local. Each branch starts `Ready`, commits
+`InFlight` before dispatch, and commits `Completed(Msg)` or `Failed(AgentError)`
+before its result is acknowledged. Normal agent failures still allow siblings
+to complete. Resume invokes only `Ready` branches with the exact original input,
+preserving completed replies and failures without replaying either. It rejects
+any `InFlight` branch, already terminal checkpoints, or incompatible version or
+agent configuration. Use a fresh key for a new run; read `finished_result()` to
+retrieve an all-terminal checkpoint's committed success or aggregate failure.
+
+After stopping the original worker and independently verifying a branch's actual
+final reply, reconcile its agent/tool state, then call
+`pipeline.reconcile_checkpointed(&store, key, record.revision, branch, verified_reply).await?`.
+The one-based branch must be `InFlight` or `Failed`; the supplied message must be
+an Assistant reply named for that branch's agent. This identity check is not
+proof of the outcome. Revision comparison prevents stale writes; `Ready` and
+`Completed` cannot be overwritten. Reconciliation only commits the verified
+reply and never invokes an agent. Explicitly resume afterward if any branches
+remain `Ready`. There is no automatic retry or tool approval.
+
+Interruption, cancellation or storage errors stop dispatch and drop active
+futures. Errors report the last confirmed checkpoint; a committed `InFlight`
+marker is conservatively reported as `Interrupted` even if invocation had not
+begun. Re-read the store after an ambiguous write result before deciding recovery.
+Pipeline and agent writes are not atomic together, and the checkpoint does not
+snapshot agent memory: configure each agent's own durable state and distinct key
+when needed. Checkpoints contain original inputs, replies and errors, potentially
+including private data. Parallel checkpointed streaming remains TODO. Offline
+committed-boundary resume demo: `cargo run --example parallel_pipeline_checkpoint`.
 
 ## Roadmap / TODO
 
@@ -768,7 +800,8 @@ after they have been exercised by working examples.
 - [x] Checkpointed streaming and safe resume from committed stage boundaries
 - [x] Bounded non-streaming parallel execution with ordered outcomes and explicit summary example
 - [x] Bounded parallel streaming with branch-aware events and ordered terminal outcomes
-- [ ] Parallel durable checkpoints/resume
+- [x] Non-streaming parallel checkpoints, SQLite persistence, safe resume and branch reconciliation
+- [ ] Parallel checkpointed streaming
 - [ ] Routed execution and delegation
 
 ### Storage Plugins

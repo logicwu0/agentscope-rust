@@ -13,8 +13,10 @@ pub use checkpoint::{
 pub use error::{PipelineConfigError, PipelineError, PipelineFailure};
 pub use event::PipelineEvent;
 pub use parallel::{
-    ParallelBranchOutcome, ParallelBranchResult, ParallelError, ParallelEvent, ParallelEventStream,
-    ParallelFailure, ParallelFuture, ParallelOutput, ParallelPipeline, ParallelStreamFuture,
+    InMemoryParallelStore, PARALLEL_CHECKPOINT_VERSION, ParallelBranchCheckpoint,
+    ParallelBranchOutcome, ParallelBranchResult, ParallelCheckpoint, ParallelError, ParallelEvent,
+    ParallelEventStream, ParallelFailure, ParallelFuture, ParallelOutput, ParallelPipeline,
+    ParallelRecord, ParallelStore, ParallelStreamFuture,
 };
 
 use crate::{

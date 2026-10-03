@@ -1,8 +1,13 @@
 //! Bounded fan-out with ordered branch outcomes and cooperative interruption.
 
+mod checkpoint;
 mod event;
 mod streaming;
 
+pub use checkpoint::{
+    InMemoryParallelStore, PARALLEL_CHECKPOINT_VERSION, ParallelBranchCheckpoint,
+    ParallelCheckpoint, ParallelRecord, ParallelStore,
+};
 pub use event::ParallelEvent;
 pub use streaming::{ParallelEventStream, ParallelStreamFuture};
 
@@ -31,9 +36,9 @@ pub enum ParallelBranchOutcome {
     Completed(Msg),
     /// Agent failure, including pending confirmation or uncertain tool execution.
     Failed(Box<AgentError>),
-    /// Reply or stream was invoked but no terminal result was observed before
-    /// pipeline interruption.
-    /// External effects and agent state may still require reconciliation.
+    /// Reply/stream was interrupted, or a durable dispatch marker has no
+    /// committed result. A marker may precede actual invocation; external effects
+    /// and agent state still require inspection before replay.
     Interrupted,
     /// This branch's reply or stream was never invoked.
     NotStarted,
@@ -57,7 +62,7 @@ pub struct ParallelOutput {
 }
 
 /// Why the fan-out did not complete successfully.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParallelFailure {
     /// Another run on this pipeline or a clone holds the run lock.
@@ -66,6 +71,10 @@ pub enum ParallelFailure {
     Interrupted,
     /// All branches were attempted; at least one agent returned an error.
     AgentFailures,
+    /// Checkpoint storage failed; active or ambiguously saved work is uncertain.
+    Store(String),
+    /// Stored progress cannot be safely resumed or reconciled as requested.
+    UnsafeResume(String),
 }
 
 /// Failed run with all observed outcomes in configured order.
@@ -76,14 +85,15 @@ pub enum ParallelFailure {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ParallelError {
     pub cause: ParallelFailure,
-    /// One outcome per branch except for `Busy`, which dispatches nothing and
-    /// returns an empty list. Interrupted runs also distinguish unstarted work.
+    /// Ordered diagnostics. `Busy` and failures before loading/creating a
+    /// checkpoint return an empty list; checkpoint errors otherwise reflect the
+    /// last known committed record, which can differ from an ambiguous write.
     pub branches: Vec<ParallelBranchResult>,
 }
 
 impl fmt::Display for ParallelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.cause {
+        match &self.cause {
             ParallelFailure::Busy => f.write_str("parallel pipeline already has an active run"),
             ParallelFailure::Interrupted => {
                 f.write_str("parallel pipeline interrupted; prior effects are not rolled back")
@@ -99,6 +109,8 @@ impl fmt::Display for ParallelError {
                     "parallel pipeline completed with {failed} agent failure(s)"
                 )
             }
+            ParallelFailure::Store(reason) => write!(f, "parallel checkpoint store: {reason}"),
+            ParallelFailure::UnsafeResume(reason) => write!(f, "unsafe parallel resume: {reason}"),
         }
     }
 }
@@ -120,9 +132,10 @@ type BranchFuture<'a> =
 /// cannot be detected through `dyn Agent`. Avoid independent concurrent use of
 /// these same agents. Clones share the run lock and interrupt handle.
 ///
-/// This orchestrator has no combined memory, checkpoint or resume API. Every
-/// run/stream is new work. Dropping its future or stream stops dispatch and drops
-/// active agent operations without spawning tasks or undoing external effects.
+/// This orchestrator has no combined memory. Plain `run`/`stream` always start
+/// new work; opt-in checkpoint methods track branch progress separately from
+/// agent state. Dropping an operation stops dispatch and drops active agent
+/// operations without spawning tasks or undoing external effects.
 #[derive(Clone)]
 pub struct ParallelPipeline {
     branches: Arc<Vec<Stage>>,

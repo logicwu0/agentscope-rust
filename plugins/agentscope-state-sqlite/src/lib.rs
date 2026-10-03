@@ -1,6 +1,8 @@
 //! `SQLite` persistence for complete `AgentScope` agent snapshots.
 
+mod parallel;
 mod pipeline;
+pub use parallel::SQLiteParallelStore;
 pub use pipeline::SQLitePipelineStore;
 
 use agentscope::{

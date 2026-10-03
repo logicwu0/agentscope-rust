@@ -548,8 +548,32 @@ Agent 内部步骤编号保持原样。中间事件按就绪顺序交错，仅�
 丢弃活动流，保留已观察到的终态回复或错误，并区分未完成和未启动的分支。
 
 事件流不启动后台任务；不轮询就不启动工作，丢弃会释放运行锁，但不补发终止事件。
-需要 Agent 完成状态保存时，应读取到终止事件；已产生的副作用不回滚。并行持久化
-检查点与恢复仍在 TODO。离线流式示例：`cargo run --example parallel_pipeline_stream`。
+需要 Agent 完成状态保存时，应读取到终止事件；已产生的副作用不回滚。
+离线流式示例：`cargo run --example parallel_pipeline_stream`。
+
+需要显式的**非流式**持久化恢复时，使用 `run_checkpointed(&store, key, input)`，
+之后调用 `resume_checkpointed(&store, key)`。
+`agentscope-state-sqlite::SQLiteParallelStore` 用独立数据表保存带版本和 revision 的
+分支检查点；`InMemoryParallelStore` 只保存在进程内。分支初始为 `Ready`，调度前先
+提交 `InFlight`，确认结果前提交 `Completed(Msg)` 或 `Failed(AgentError)`。普通 Agent
+失败仍允许其他分支完成。恢复仅用完全相同的原始输入启动 `Ready` 分支，保留已经
+完成或失败的结果，不重跑这两类分支。存在 `InFlight`、检查点已全部终态、版本或
+Agent 配置不兼容时拒绝恢复。新运行使用新 key；全部终态的已提交成功或聚合失败结果
+可通过 `finished_result()` 读取。
+
+先停止原工作进程，独立核实分支的真实最终回复，并核对相应 Agent/工具状态，再调用
+`pipeline.reconcile_checkpointed(&store, key, record.revision, branch, verified_reply).await?`。
+一基分支编号对应的状态必须为 `InFlight` 或 `Failed`；提交的消息必须是以该 Agent
+命名的 `Assistant` 回复。身份校验不能证明执行结果。revision 比较防止旧版本覆盖，
+`Ready` 和 `Completed` 不可覆盖。核对只保存已验证回复，不调用 Agent；若仍有
+`Ready` 分支，再显式恢复。不会自动重试或批准工具。
+
+中断、取消或存储错误会停止调度并丢弃活动 future。错误按最后确认的检查点报告；
+已提交的 `InFlight` 标记会保守地报告为 `Interrupted`，即使调用尚未开始。写入结果
+不确定时，应重新读取存储，再决定恢复方式。Pipeline 与 Agent 写入不构成原子事务，
+检查点也不保存 Agent 记忆；需要持久化时，各 Agent 仍需独立状态存储和不同 key。
+检查点包含原始输入、回复和错误，可能含私有数据。并行带检查点的流式执行仍在 TODO。
+已提交边界恢复的离线示例：`cargo run --example parallel_pipeline_checkpoint`。
 
 ## 路线图 / TODO
 
@@ -638,7 +662,8 @@ Agent 内部步骤编号保持原样。中间事件按就绪顺序交错，仅�
 - [x] 带检查点的流式执行与从已提交阶段边界安全恢复
 - [x] 有并发上限的非流式并行执行、有序分支结果与显式汇总示例
 - [x] 有并发上限的并行流式执行、分支事件与有序终态结果
-- [ ] 并行持久化检查点/恢复
+- [x] 非流式并行检查点、SQLite 持久化、安全恢复与分支结果核对
+- [ ] 并行带检查点的流式执行
 - [ ] 路由执行与任务委派
 
 ### 存储插件
