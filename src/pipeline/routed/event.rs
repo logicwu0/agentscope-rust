@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RoutedEvent {
     /// The route is selected; the agent operation has not yet been invoked.
+    /// Checkpointed streams have committed the `InFlight` dispatch fence.
     RouteStarted {
         /// Exact caller-selected route key.
         route: String,
@@ -21,6 +22,8 @@ pub enum RoutedEvent {
         agent_name: String,
     },
     /// An unmodified event from the selected agent, including its local step.
+    /// In checkpointed streams, even an agent terminal event is an observation,
+    /// not a durable acknowledgement; consume the routed terminal event.
     Agent {
         /// Exact caller-selected route key.
         route: String,
@@ -29,8 +32,11 @@ pub enum RoutedEvent {
         /// Original event, not a synthesized or filtered message.
         event: AgentEvent,
     },
-    /// The agent finished; contains its complete original reply.
+    /// The agent finished; contains its complete original reply. Checkpointed
+    /// streams emit this only after committing the completed checkpoint.
     Finished { output: RoutedOutput },
     /// Terminal failure; no other route is dispatched and no retry is authorized.
+    /// In checkpointed streams, an agent failure acknowledges a committed
+    /// `Failed` result; interruption or storage errors do not acknowledge it.
     Error { error: RoutedError },
 }

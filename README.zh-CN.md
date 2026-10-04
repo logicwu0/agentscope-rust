@@ -633,7 +633,7 @@ Agent；即使其他 route 正忙，也仍返回未知路由错误。
 
 路由终态事件发出前会释放共享运行锁。丢弃流也释放锁并取消所选任务，但不补发终态、
 回滚副作用或重试；Pipeline 中断不会调用子 Agent 的中断句柄。需要 Agent 完成收尾时，
-应读取到终止事件。路由带检查点的流式执行、模型自动选择与 Leader/Member 任务委派仍在 TODO。
+应读取到终止事件。模型自动选择与 Leader/Member 任务委派仍在 TODO。
 流式离线示例：`cargo run --example routed_pipeline_stream`。
 
 ### 非流式路由检查点
@@ -667,6 +667,30 @@ route 对应的捕获名称；其他 route 可以变化。名称只提供符号�
 重试或恢复子 Agent 状态。工具待确认及执行不确定错误保留为 `Failed`，需要先通过
 原 Agent API 处理，再提交核实后的最终回复。离线示例使用没有真实外部副作用的本地
 gate 模型：`cargo run --example routed_pipeline_checkpoint`。
+
+### 路由带检查点的流式执行
+
+`stream_checkpointed(&store, key, route, input).await?` 创建 `Ready` 并占用所有
+run/stream/克隆共享的运行锁，不调用 Agent。
+`resume_checkpointed_stream(&store, key).await?` 仅加载并校验 `Ready`，也兼容
+非流式运行准备的检查点。首次轮询先提交 `InFlight` 再发出 `RouteStarted`，
+后续轮询才调用所选 Agent。开始事件表示已选择路由并提交执行标记，不保证 Agent
+已经或将会调用；发出 `RouteStarted` 前观察到中断则直接发出路由 `Error`。
+
+Agent 事件仍原样包装，但包装的 Agent `Finished`、`Error` 或
+`ToolConfirmationRequired` **不是**持久化确认。该事件发出时子流已丢弃，记录仍为
+`InFlight`。继续轮询，提交 `Completed`/`Failed` 后才发出路由自身的 `Finished` 或
+Agent 失败的 `Error`。
+启动失败、流内错误及无终态 EOF 也保存为 `Failed`。已观察到的终态不会被稍晚到达的
+中断覆盖；存储写入等待确认，不与中断句柄抢占。路由 `Finished` 或 Agent 失败的 `Error`
+确认终态写入；中断或存储错误的 `Error` 不提供此确认。
+
+标记前丢弃或中断保留 `Ready`，标记后保留 `InFlight`，除非终态写入已经提交。
+没有后台任务、丢弃时补发事件、回滚或自动重放。`InFlight` 和终态记录拒绝恢复执行，
+需要时沿用已有显式核对流程。失败或被取消的写入可能已经提交，需读取实际记录。
+Agent 状态仍是独立事务，路由终态发出前释放共享运行锁。这些 API 同时支持
+`InMemoryRoutedStore` 与无需修改 schema 的 `SQLiteRoutedStore`。离线示例：
+`cargo run --example routed_pipeline_checkpoint_stream`。
 
 ## 路线图 / TODO
 
@@ -760,7 +784,7 @@ gate 模型：`cargo run --example routed_pipeline_checkpoint`。
 - [x] 显式非流式路由、精确 route 查找与原样消息传递
 - [x] 路由流式事件、惰性的单 Agent 分发与原始终态结果
 - [x] 非流式路由检查点、SQLite 持久化、安全恢复与显式结果核对
-- [ ] 路由带检查点的流式执行与安全恢复
+- [x] 路由带检查点的流式执行与安全恢复
 - [ ] 模型驱动的 route 选择与 Leader/Member 任务委派
 
 ### 存储插件

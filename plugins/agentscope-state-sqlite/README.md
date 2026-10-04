@@ -38,7 +38,14 @@ tools, retry an uncertain execution or snapshot the selected agent. Bind that
 agent to its own durable state when needed; agent and routed writes are separate
 transactions. Stop the original worker before recovery and re-read the store
 after an ambiguous write error. Protect this database as private application data.
-Routed checkpointed streaming remains a future extension.
+The same store and schema support `stream_checkpointed` and
+`resume_checkpointed_stream`. Preparation creates or validates `Ready` without
+calling an agent; polling commits `InFlight` before dispatch. A wrapped agent
+terminal event is not a storage acknowledgement: consume the routed `Finished`
+or agent-failure `Error` after `Completed`/`Failed` commits. Interruption or store
+errors do not acknowledge a terminal write. Dropping after the dispatch fence,
+before a terminal write commits, leaves uncertain `InFlight` progress, not
+permission to replay it.
 
 ## 简体中文
 
@@ -58,5 +65,9 @@ Token 用量与结构化 Agent 错误。即时事务内比较 revision：`None` 
 仅 `Ready` 可恢复执行，`InFlight` 需外部核对并显式提交结果；终态读取而不重跑。
 插件不会批准工具、重试不确定执行或保存所选 Agent 的记忆。需要时，Agent 仍需单独
 绑定持久化状态，Agent 与路由写入不构成原子事务。恢复前停止原工作进程，写入结果
-不确定时重新读取记录。数据库可能含私有数据，应作为应用数据保护。路由带检查点
-的流式执行留作后续扩展。
+不确定时重新读取记录。数据库可能含私有数据，应作为应用数据保护。
+相同存储与 schema 也支持 `stream_checkpointed` 和 `resume_checkpointed_stream`。
+准备阶段创建或校验 `Ready`，不调用 Agent；轮询时先提交 `InFlight` 再分发。
+包装的 Agent 终态不是存储确认，需继续读取到 `Completed`/`Failed` 提交后的路由
+`Finished` 或 Agent 失败的 `Error`；中断或存储错误不确认终态写入。
+执行标记后、终态尚未提交时丢弃流会保留不确定的 `InFlight`，不授权自动重放。

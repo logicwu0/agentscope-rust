@@ -1,3 +1,4 @@
+use super::super::streaming_tests_support::*;
 use super::*;
 use crate::*;
 use futures_util::{FutureExt, StreamExt};
@@ -6,9 +7,6 @@ use std::{
     error::Error as _,
     sync::{Arc, atomic::Ordering},
 };
-#[path = "tests_support.rs"]
-mod support;
-use support::*;
 
 #[tokio::test]
 async fn preparation_is_exact_lazy_and_shares_run_stream_and_clone_lock() {

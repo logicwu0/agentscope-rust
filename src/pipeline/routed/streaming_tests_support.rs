@@ -1,3 +1,5 @@
+//! Shared deterministic agent fixtures for routed stream tests.
+
 use crate::*;
 use futures_core::Stream;
 use futures_util::future::poll_fn;

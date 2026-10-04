@@ -11,6 +11,7 @@ use std::{future::Future, pin::Pin};
 pub type RoutedEventStream<'a> = Pin<Box<dyn Stream<Item = RoutedEvent> + Send + 'a>>;
 
 /// Lazy route validation and shared-lock reservation; no agent runs here.
+/// Checkpointed methods also create or validate stored progress during preparation.
 pub type RoutedStreamFuture<'a> =
     Pin<Box<dyn Future<Output = Result<RoutedEventStream<'a>, RoutedError>> + Send + 'a>>;
 
@@ -127,7 +128,7 @@ fn attributed_error(route: &str, name: &str, cause: RoutedFailure) -> RoutedErro
     }
 }
 
-fn terminal_outcome(event: &AgentEvent) -> Option<Result<Msg, RoutedFailure>> {
+pub(super) fn terminal_outcome(event: &AgentEvent) -> Option<Result<Msg, RoutedFailure>> {
     match event {
         AgentEvent::Finished { message, .. } => Some(Ok(message.clone())),
         AgentEvent::Error { error, .. } => Some(Err(RoutedFailure::Agent(Box::new(error.clone())))),

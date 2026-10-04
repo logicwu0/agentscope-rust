@@ -2,6 +2,7 @@
 
 mod execution;
 mod reconciliation;
+mod streaming;
 
 use super::{RoutedError, RoutedFailure, RoutedOutput, RoutedPipeline, Stage};
 use crate::{AgentError, Msg, PipelineStoreError, PipelineStoreFuture, StateKey};
@@ -151,6 +152,23 @@ impl RoutedStore for InMemoryRoutedStore {
 }
 
 impl RoutedPipeline {
+    fn validate_ready_checkpoint<'a>(
+        &'a self,
+        record: &RoutedRecord,
+    ) -> Result<&'a Stage, RoutedError> {
+        let stage = self.validate_checkpoint(record)?;
+        if record.checkpoint.status != RoutedCheckpointStatus::Ready {
+            return Err(checkpoint_error(
+                Some(&record.checkpoint),
+                RoutedFailure::UnsafeResume(
+                    "only ready progress can resume; in-flight or terminal work cannot be replayed"
+                        .into(),
+                ),
+            ));
+        }
+        Ok(stage)
+    }
+
     fn validate_checkpoint<'a>(&'a self, record: &RoutedRecord) -> Result<&'a Stage, RoutedError> {
         let checkpoint = &record.checkpoint;
         let failure = || {

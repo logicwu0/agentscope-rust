@@ -791,8 +791,8 @@ The shared run lock is released before the routed terminal event is emitted.
 Dropping the stream releases it and cancels the selected operation without
 synthesizing a terminal event, rolling back effects or retrying. Pipeline
 interruption does not call the child's interrupt handle. Consume to the terminal
-event when agent finalization matters. Checkpointed routing streams, model-driven
-selection and leader/member delegation remain TODO. Offline streaming demo:
+event when agent finalization matters. Model-driven selection and leader/member
+delegation remain TODO. Offline streaming demo:
 `cargo run --example routed_pipeline_stream`.
 
 ### Non-streaming routed checkpoints
@@ -837,6 +837,37 @@ or restore child state. Confirmation and uncertain-execution errors remain
 `Failed`: resolve them through the original agent's APIs before submitting its
 verified final reply. The offline demo uses a local gated mock with no real
 external side effects: `cargo run --example routed_pipeline_checkpoint`.
+
+### Checkpointed routed streaming
+
+`stream_checkpointed(&store, key, route, input).await?` creates `Ready` and reserves
+the shared run/stream/clone lock without calling an agent.
+`resume_checkpointed_stream(&store, key).await?` loads and validates only `Ready`
+progress, including checkpoints prepared by a non-streaming run. The first poll
+commits `InFlight` before emitting `RouteStarted`; a later poll invokes only the
+selected agent. The start event records selection and the durable dispatch fence,
+not a guarantee that the agent has been or will be called. Interruption observed
+before emitting `RouteStarted` produces routed `Error` instead.
+
+Original agent events are forwarded unchanged, but the wrapped agent `Finished`,
+`Error` or `ToolConfirmationRequired` is **not** a durable acknowledgement. At that
+yield, the child stream has been dropped and the record is still `InFlight`.
+Continue polling: the router commits `Completed`/`Failed` before emitting its own
+`Finished`/agent-failure `Error`. Startup failures, error items and missing-terminal
+EOF also commit `Failed`. An already observed terminal outcome survives a late
+interrupt; store writes are awaited rather than raced against the interrupt
+handle. A routed `Finished` or agent-failure `Error` acknowledges the terminal
+write; an interruption or storage `Error` does not.
+
+Dropping or interrupting before the fence leaves `Ready`; after the fence it
+leaves `InFlight` unless a terminal write has committed. There are no background
+tasks, synthetic drop events, rollback or automatic replay. `InFlight` and terminal
+records reject resume; use the existing explicit reconciliation procedure when
+needed. A failed or cancelled store write may already have committed, so inspect
+the actual record. Agent state remains a separate transaction. The shared lock is
+released before the routed terminal event. These APIs work with both
+`InMemoryRoutedStore` and the unchanged `SQLiteRoutedStore` schema. Offline demo:
+`cargo run --example routed_pipeline_checkpoint_stream`.
 
 ## Roadmap / TODO
 
@@ -931,7 +962,7 @@ after they have been exercised by working examples.
 - [x] Explicit non-streaming routing with exact route lookup and unchanged messages
 - [x] Routed streaming events with lazy single-agent dispatch and original terminal outcomes
 - [x] Non-streaming routed checkpoints, SQLite persistence, safe resume and explicit reconciliation
-- [ ] Routed checkpointed streaming and safe resume
+- [x] Routed checkpointed streaming and safe resume
 - [ ] Model-driven route selection and leader/member delegation
 
 ### Storage Plugins

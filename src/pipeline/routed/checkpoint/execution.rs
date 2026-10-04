@@ -92,16 +92,7 @@ impl RoutedPipeline {
         mut record: RoutedRecord,
         mut interrupt: AgentInterruptToken,
     ) -> Result<RoutedOutput, RoutedError> {
-        let stage = self.validate_checkpoint(&record)?;
-        if record.checkpoint.status != RoutedCheckpointStatus::Ready {
-            return Err(checkpoint_error(
-                Some(&record.checkpoint),
-                RoutedFailure::UnsafeResume(
-                    "only ready progress can resume; in-flight or terminal work cannot be replayed"
-                        .into(),
-                ),
-            ));
-        }
+        let stage = self.validate_ready_checkpoint(&record)?;
         if interrupt.is_interrupted() {
             return Err(checkpoint_error(
                 Some(&record.checkpoint),

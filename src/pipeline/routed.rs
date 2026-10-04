@@ -5,6 +5,9 @@ mod error;
 mod event;
 mod streaming;
 
+#[cfg(test)]
+mod streaming_tests_support;
+
 pub use checkpoint::{
     InMemoryRoutedStore, ROUTED_CHECKPOINT_VERSION, RoutedCheckpoint, RoutedCheckpointStatus,
     RoutedRecord, RoutedStore,
@@ -47,8 +50,8 @@ pub type RoutedFuture<'a> =
 /// same target agents while using this orchestrator. Shared backing memories
 /// cannot be detected through `dyn Agent`.
 ///
-/// Ordinary runs and streams have no route checkpoint. Non-streaming
-/// checkpointed runs fence dispatch with revisioned storage and resume only
+/// Ordinary runs and streams have no route checkpoint. Checkpointed
+/// runs and streams fence dispatch with revisioned storage and resume only
 /// undispatched work. No operation automatically retries, restores child state
 /// or rolls back effects. Pending tool confirmation and uncertain execution
 /// remain original agent errors for the caller to resolve using the selected
