@@ -1,5 +1,6 @@
 //! Configuration and attributed runtime failures for explicit routing.
 
+use super::RouteSelectionError;
 use crate::AgentError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -39,6 +40,8 @@ pub enum RoutedFailure {
     Busy,
     /// The pipeline interrupted the active reply; effects may be uncertain.
     Interrupted,
+    /// Model selection failed before any target was invoked.
+    Selection(RouteSelectionError),
     /// The original error, including confirmation or uncertain tool execution.
     Agent(Box<AgentError>),
     /// Storage failed or conflicted; inspect the authoritative record before retrying.
@@ -54,10 +57,10 @@ pub enum RoutedFailure {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RoutedError {
     /// Exact requested or stored route key, including an unknown key. Empty when
-    /// a checkpoint operation has not obtained its saved selection yet.
+    /// a checkpoint or model-selection operation has not obtained its selection yet.
     pub route: String,
     /// Captured target name when the requested or saved selection is available.
-    /// `None` for unknown routes and checkpoint failures before loading selection.
+    /// `None` for unknown routes and failures before obtaining a selection.
     pub agent_name: Option<String>,
     pub cause: RoutedFailure,
 }
@@ -76,6 +79,7 @@ impl fmt::Display for RoutedError {
             RoutedFailure::Interrupted => {
                 f.write_str(" interrupted; prior effects are not rolled back")
             }
+            RoutedFailure::Selection(error) => write!(f, " selection failed: {error}"),
             RoutedFailure::Agent(error) => write!(f, " stopped: {error}"),
             RoutedFailure::Store(reason) => write!(f, " checkpoint storage failed: {reason}"),
             RoutedFailure::UnsafeResume(reason) => {
@@ -89,6 +93,7 @@ impl std::error::Error for RoutedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.cause {
             RoutedFailure::Agent(error) => Some(error.as_ref()),
+            RoutedFailure::Selection(error) => Some(error),
             _ => None,
         }
     }

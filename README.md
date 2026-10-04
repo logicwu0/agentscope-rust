@@ -791,8 +791,8 @@ The shared run lock is released before the routed terminal event is emitted.
 Dropping the stream releases it and cancels the selected operation without
 synthesizing a terminal event, rolling back effects or retrying. Pipeline
 interruption does not call the child's interrupt handle. Consume to the terminal
-event when agent finalization matters. Model-driven selection and leader/member
-delegation remain TODO. Offline streaming demo:
+event when agent finalization matters. Model selection is available through the
+separate `ModelRouter` below; leader/member delegation remains TODO. Offline streaming demo:
 `cargo run --example routed_pipeline_stream`.
 
 ### Non-streaming routed checkpoints
@@ -868,6 +868,65 @@ the actual record. Agent state remains a separate transaction. The shared lock i
 released before the routed terminal event. These APIs work with both
 `InMemoryRoutedStore` and the unchanged `SQLiteRoutedStore` schema. Offline demo:
 `cargo run --example routed_pipeline_checkpoint_stream`.
+
+### Model-assisted route selection
+
+`ModelRouter` adds a non-streaming classifier to an existing `RoutedPipeline`.
+Its nonempty allowlist may contain a subset of registered routes, each with a
+nonblank description. Unknown or duplicate entries are rejected at construction.
+The selector model must advertise structured-output support. Selection requests
+use a fixed 256-output-token budget; long route keys or truncated responses can
+fail closed, without retry or fallback.
+
+```rust
+let router = agentscope::ModelRouter::from_shared(
+    pipeline.clone(),
+    selector_model,
+    vec![
+        ("code".into(), "Rust code, debugging and implementation".into()),
+        ("writing".into(), "Drafting and editing prose".into()),
+    ],
+)?;
+let output = router.run(agentscope::Msg::user("Review this Rust code")).await?;
+```
+
+`run(input)` selects and invokes exactly one agent under the pipeline's shared
+run/stream/clone lock and interrupt token. The selected worker receives the
+original `Msg`, and its reply is returned unchanged; independent agent memory is
+not merged. Selection sees only the input's text blocks joined with `\n`, not its
+role, name, IDs, metadata, thinking, data, tools or conversation history. Input
+with no text or only whitespace is rejected before a model call. The selector
+receives no tools, but plain text can still contain sensitive information: curate
+it before calling an external model.
+
+The response must be complete, normally finished structured output with exactly
+`{"route":"exact-allowlisted-key"}` or `{"route":null}`. `null` produces `NoMatch`;
+invalid shapes, extra keys and unlisted routes fail without calling a worker.
+The router performs no plain-text JSON parsing, normalization, fallback or retry;
+the configured model may implement its own transport retries.
+The returned schema is not trusted: local allowlist validation is mandatory, and
+route selection does not grant tool permission or bypass existing confirmation.
+The model can still choose the wrong allowed route, including due to prompt
+injection, so expose only appropriate targets in the catalog.
+Local selection-validation errors do not expose raw selector output or private
+thinking. Provider `ModelError` diagnostics are retained unchanged and may contain
+sensitive details, so protect error logs.
+
+`select(input)` calls only the classifier and returns `RouteSelection` with route,
+captured agent name and optional selector usage. Hand that route to existing
+explicit `run`, `stream` or checkpoint APIs if needed. Selection and a subsequent
+call are separate operations, not an atomic locked workflow. For example:
+
+```rust
+let selected = router.select(input.clone()).await?;
+let output = pipeline.run_checkpointed(&store, key, selected.route, input).await?;
+```
+
+This checkpoint retains the already selected route; recovery does not rerun the
+classifier. `ModelRouter::run` returns the worker's `RoutedOutput` and does not add
+selector tokens to worker usage. Automatic selection streaming/checkpoint APIs
+and leader/member delegation remain TODO. Offline example:
+`cargo run --example model_routed_pipeline`.
 
 ## Roadmap / TODO
 
@@ -963,7 +1022,9 @@ after they have been exercised by working examples.
 - [x] Routed streaming events with lazy single-agent dispatch and original terminal outcomes
 - [x] Non-streaming routed checkpoints, SQLite persistence, safe resume and explicit reconciliation
 - [x] Routed checkpointed streaming and safe resume
-- [ ] Model-driven route selection and leader/member delegation
+- [x] Basic non-streaming model-assisted route selection with strict local allowlists
+- [ ] Automatic selection streaming and checkpointed selection/recovery
+- [ ] Leader/member delegation
 
 ### Storage Plugins
 

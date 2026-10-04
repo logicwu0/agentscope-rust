@@ -633,7 +633,7 @@ Agent；即使其他 route 正忙，也仍返回未知路由错误。
 
 路由终态事件发出前会释放共享运行锁。丢弃流也释放锁并取消所选任务，但不补发终态、
 回滚副作用或重试；Pipeline 中断不会调用子 Agent 的中断句柄。需要 Agent 完成收尾时，
-应读取到终止事件。模型自动选择与 Leader/Member 任务委派仍在 TODO。
+应读取到终止事件。模型选择由下方独立的 `ModelRouter` 提供；Leader/Member 任务委派仍在 TODO。
 流式离线示例：`cargo run --example routed_pipeline_stream`。
 
 ### 非流式路由检查点
@@ -691,6 +691,54 @@ Agent 失败的 `Error`。
 Agent 状态仍是独立事务，路由终态发出前释放共享运行锁。这些 API 同时支持
 `InMemoryRoutedStore` 与无需修改 schema 的 `SQLiteRoutedStore`。离线示例：
 `cargo run --example routed_pipeline_checkpoint_stream`。
+
+### 模型辅助路由选择
+
+`ModelRouter` 在已有 `RoutedPipeline` 上增加非流式分类模型。白名单必须非空，
+可以只包含部分已注册 route，每项都需要非空白描述；未知或重复项在构造时拒绝。
+选路模型必须声明支持结构化输出。选择请求固定为 256 个输出 Token 上限；route 过长
+或响应截断可能直接失败，不重试或回退。
+
+```rust
+let router = agentscope::ModelRouter::from_shared(
+    pipeline.clone(),
+    selector_model,
+    vec![
+        ("code".into(), "Rust 代码、调试与实现".into()),
+        ("writing".into(), "文章起草与编辑".into()),
+    ],
+)?;
+let output = router.run(agentscope::Msg::user("请审核这段 Rust 代码")).await?;
+```
+
+`run(input)` 在 Pipeline 的共享 run/stream/克隆锁与中断 token 下完成选路，并且
+只调用一个 Agent。所选 Agent 接收原始 `Msg`，回复也不改写，各自记忆不合并。
+分类只读取输入 Text 块，以 `\n` 连接，不读取原始 role、name、ID、metadata、
+thinking、data、工具或历史会话。没有文本或文本全空白的输入在调用模型前拒绝。
+分类模型不获得工具，但纯文本也可能含敏感信息，调用外部模型前仍应筛选内容。
+
+模型响应必须是完整、正常结束的结构化输出，且严格为
+`{"route":"精确白名单key"}` 或 `{"route":null}`。`null` 返回 `NoMatch`；
+非法结构、额外字段或白名单外 route 均失败，不调用 Agent。路由器不解析普通文本 JSON，
+不标准化、不回退也不重试；配置的模型自身可能实现传输重试。
+返回的 schema 不作为信任依据，必须本地校验白名单；
+选路不授予工具权限，也不绕过现有工具确认。本地选择校验错误不暴露模型原始输出或
+私有思考；提供方 `ModelError` 原样保留，诊断可能含敏感信息，因此应保护错误日志。
+模型仍可能选错白名单内的 route，包括受到提示注入影响，因此目录中只应开放合适的目标。
+
+`select(input)` 只调用分类模型，返回包含 route、捕获 Agent 名称及可选选路用量的
+`RouteSelection`。可将 route 交给已有显式 `run`、`stream` 或检查点 API；
+选路和后续调用是两次独立操作，不构成持锁原子流程。例如：
+
+```rust
+let selected = router.select(input.clone()).await?;
+let output = pipeline.run_checkpointed(&store, key, selected.route, input).await?;
+```
+
+该检查点保存已选 route，恢复时不重新分类。`ModelRouter::run` 只返回所选 Agent 的
+`RoutedOutput`，不把分类模型 Token 累加到 Agent 用量。自动选路的流式/检查点 API
+及 Leader/Member 任务委派仍在 TODO。离线示例：
+`cargo run --example model_routed_pipeline`。
 
 ## 路线图 / TODO
 
@@ -785,7 +833,9 @@ Agent 状态仍是独立事务，路由终态发出前释放共享运行锁。�
 - [x] 路由流式事件、惰性的单 Agent 分发与原始终态结果
 - [x] 非流式路由检查点、SQLite 持久化、安全恢复与显式结果核对
 - [x] 路由带检查点的流式执行与安全恢复
-- [ ] 模型驱动的 route 选择与 Leader/Member 任务委派
+- [x] 基础非流式模型辅助路由选择与严格本地白名单
+- [ ] 自动选路流式执行及选路检查点/恢复
+- [ ] Leader/Member 任务委派
 
 ### 存储插件
 

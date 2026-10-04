@@ -1,4 +1,4 @@
-//! Sequential, bounded parallel, and explicit routed agent orchestration.
+//! Sequential, bounded parallel, and explicit or model-selected routed orchestration.
 
 mod checkpoint;
 mod error;
@@ -20,9 +20,11 @@ pub use parallel::{
     ParallelRecord, ParallelStore, ParallelStreamFuture,
 };
 pub use routed::{
-    InMemoryRoutedStore, ROUTED_CHECKPOINT_VERSION, RoutedCheckpoint, RoutedCheckpointStatus,
-    RoutedConfigError, RoutedError, RoutedEvent, RoutedEventStream, RoutedFailure, RoutedFuture,
-    RoutedOutput, RoutedPipeline, RoutedRecord, RoutedStore, RoutedStreamFuture,
+    InMemoryRoutedStore, ModelRouter, ModelRouterConfigError, ROUTED_CHECKPOINT_VERSION,
+    RouteSelection, RouteSelectionError, RouteSelectionFuture, RoutedCheckpoint,
+    RoutedCheckpointStatus, RoutedConfigError, RoutedError, RoutedEvent, RoutedEventStream,
+    RoutedFailure, RoutedFuture, RoutedOutput, RoutedPipeline, RoutedRecord, RoutedStore,
+    RoutedStreamFuture,
 };
 
 use crate::{

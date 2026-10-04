@@ -3,6 +3,7 @@
 mod checkpoint;
 mod error;
 mod event;
+mod model_router;
 mod streaming;
 
 #[cfg(test)]
@@ -14,6 +15,9 @@ pub use checkpoint::{
 };
 pub use error::{RoutedConfigError, RoutedError, RoutedFailure};
 pub use event::RoutedEvent;
+pub use model_router::{
+    ModelRouter, ModelRouterConfigError, RouteSelection, RouteSelectionError, RouteSelectionFuture,
+};
 pub use streaming::{RoutedEventStream, RoutedStreamFuture};
 
 use super::Stage;
@@ -39,7 +43,8 @@ pub type RoutedFuture<'a> =
 
 /// Routes one NEW reply to the explicitly selected agent.
 ///
-/// This is an orchestrator, not an `Agent` or a model-driven classifier. Routes
+/// This is an orchestrator, not an `Agent`. [`ModelRouter`] adds opt-in model
+/// selection over an explicit allowlist. Routes
 /// are immutable, exact keys with no case folding, whitespace normalization,
 /// fallback or broadcast. Different keys can intentionally alias the same
 /// agent; agent names need not be unique because route keys identify selections.
