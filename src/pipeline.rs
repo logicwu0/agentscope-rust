@@ -1,9 +1,10 @@
-//! Sequential and bounded parallel agent orchestration.
+//! Sequential, bounded parallel, and explicit routed agent orchestration.
 
 mod checkpoint;
 mod error;
 mod event;
 mod parallel;
+mod routed;
 mod streaming_checkpoint;
 pub use checkpoint::{
     InMemoryPipelineStore, PIPELINE_CHECKPOINT_VERSION, PipelineCheckpoint,
@@ -17,6 +18,9 @@ pub use parallel::{
     ParallelBranchOutcome, ParallelBranchResult, ParallelCheckpoint, ParallelError, ParallelEvent,
     ParallelEventStream, ParallelFailure, ParallelFuture, ParallelOutput, ParallelPipeline,
     ParallelRecord, ParallelStore, ParallelStreamFuture,
+};
+pub use routed::{
+    RoutedConfigError, RoutedError, RoutedFailure, RoutedFuture, RoutedOutput, RoutedPipeline,
 };
 
 use crate::{

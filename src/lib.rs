@@ -18,7 +18,8 @@ pub use pipeline::{
     ParallelStore, ParallelStreamFuture, PipelineCheckpoint, PipelineCheckpointStatus,
     PipelineConfigError, PipelineError, PipelineEvent, PipelineEventStream, PipelineFailure,
     PipelineFuture, PipelineOutput, PipelineRecord, PipelineStep, PipelineStore,
-    PipelineStoreError, PipelineStoreFuture, PipelineStreamFuture, SequentialPipeline,
+    PipelineStoreError, PipelineStoreFuture, PipelineStreamFuture, RoutedConfigError, RoutedError,
+    RoutedFailure, RoutedFuture, RoutedOutput, RoutedPipeline, SequentialPipeline,
 };
 
 pub use agent::{

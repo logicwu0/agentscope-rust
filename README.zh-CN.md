@@ -590,6 +590,34 @@ Agent 配置不兼容时拒绝恢复。新运行使用新 key；全部终态的�
 Agent 状态保存。流式中断与恢复离线示例：
 `cargo run --example parallel_pipeline_checkpoint_stream`。
 
+### 显式选择 Agent 的非流式路由
+
+`RoutedPipeline` 根据调用方指定的 route，仅调用一个 Agent：
+
+```rust
+let pipeline = agentscope::RoutedPipeline::new(vec![
+    ("code".into(), std::sync::Arc::new(coder)),
+    ("writing".into(), std::sync::Arc::new(writer)),
+])?;
+let output = pipeline.run("code", agentscope::Msg::user("请审核这段 Rust 代码")).await?;
+```
+
+路由列表必须非空，key 不可为空白或重复。查找精确匹配，区分大小写和空白。
+Agent 名称无需唯一，不同 route 可以指向同一 Agent。结果包含 `route`、构造时记录的
+Agent 名称和原始 `message`。输入与回复均原样传递，保留思考、数据块和私有元数据；
+展示或分享结果时，应主动选择公开内容。
+
+未知路由始终返回不带 Agent 名称的 `UnknownRoute`，不会调用任何 Agent，也不会
+回退或广播。所有 route 及 Pipeline 克隆共享一个运行锁，已知 route 重叠运行返回
+`Busy`。中断句柄或丢弃运行 future 会停止所选 Agent 的回复，但不会回滚已产生的
+副作用或 Agent 状态。Pipeline 不合并或清空记忆；独立 Agent 应使用独立 Memory
+和不同持久化 `StateKey`，不要同时在其他地方使用相同 Agent。
+
+失败保留原始 `AgentError`，包括工具待确认和执行结果不确定。调用方需保留原 Agent
+引用，通过 Agent API 批准或核对其检查点；路由器不会自动续接暂停的回复或重试。
+本版本提供调用方显式选择的非流式分发；路由流式事件/检查点、模型自动选择与
+Leader/Member 任务委派仍在 TODO。离线示例：`cargo run --example routed_pipeline`。
+
 ## 路线图 / TODO
 
 项目将采用渐进式开发。只有经过可运行示例验证的接口，才会逐步进入稳定状态。
@@ -679,7 +707,9 @@ Agent 状态保存。流式中断与恢复离线示例：
 - [x] 有并发上限的并行流式执行、分支事件与有序终态结果
 - [x] 非流式并行检查点、SQLite 持久化、安全恢复与分支结果核对
 - [x] 并行带检查点的流式执行、已提交分支结果与安全恢复
-- [ ] 路由执行与任务委派
+- [x] 显式非流式路由、精确 route 查找与原样消息传递
+- [ ] 路由流式事件与持久化检查点/恢复
+- [ ] 模型驱动的 route 选择与 Leader/Member 任务委派
 
 ### 存储插件
 

@@ -735,6 +735,41 @@ needed. Poll through the terminal event for agent state finalization. The offlin
 streaming interruption/resume demo is
 `cargo run --example parallel_pipeline_checkpoint_stream`.
 
+### Explicit non-streaming agent routing
+
+`RoutedPipeline` dispatches a caller-selected route to exactly one agent:
+
+```rust
+let pipeline = agentscope::RoutedPipeline::new(vec![
+    ("code".into(), std::sync::Arc::new(coder)),
+    ("writing".into(), std::sync::Arc::new(writer)),
+])?;
+let output = pipeline.run("code", agentscope::Msg::user("Review this Rust code")).await?;
+```
+
+The route list must be nonempty with unique nonblank keys. Lookup is exact and
+case/whitespace sensitive. Agent names do not have to be unique, and several
+route keys may alias one agent. The result includes `route`, the agent name
+captured at construction, and its original `message`. The input and reply are
+passed through unchanged, including thinking, data blocks and private metadata;
+select visible content before displaying or sharing the result.
+
+Unknown routes always return `UnknownRoute` with no agent name and invoke no
+agent: there is no fallback or broadcast. All routes and pipeline clones share
+one run lock; overlapping known-route runs return `Busy`. The interrupt handle
+or dropping the future stops the selected reply, without rolling back effects
+or agent state. The pipeline does not merge or reset memory. Use independent
+Memory instances and distinct durable StateKeys for independent agents, and
+do not use the same agents concurrently elsewhere.
+
+Agent failures retain their original `AgentError`, including confirmation and
+uncertain tool execution. Keep the original agent handle to approve or reconcile
+its checkpoint through the agent API. The router does not automatically continue
+the paused reply or retry it. This first version provides caller-selected
+non-streaming dispatch; routing streams/checkpoints, model-driven selection and
+leader/member delegation remain TODO. Offline demo:
+`cargo run --example routed_pipeline`.
+
 ## Roadmap / TODO
 
 The roadmap is intentionally incremental. Interfaces will be stabilized only
@@ -825,7 +860,9 @@ after they have been exercised by working examples.
 - [x] Bounded parallel streaming with branch-aware events and ordered terminal outcomes
 - [x] Non-streaming parallel checkpoints, SQLite persistence, safe resume and branch reconciliation
 - [x] Parallel checkpointed streaming with committed branch outcomes and safe resume
-- [ ] Routed execution and delegation
+- [x] Explicit non-streaming routing with exact route lookup and unchanged messages
+- [ ] Routed streaming events and durable checkpoints/resume
+- [ ] Model-driven route selection and leader/member delegation
 
 ### Storage Plugins
 
