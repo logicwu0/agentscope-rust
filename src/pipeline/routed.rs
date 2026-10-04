@@ -1,9 +1,14 @@
 //! Exact, caller-selected routing to one agent without fallback or broadcast.
 
+mod checkpoint;
 mod error;
 mod event;
 mod streaming;
 
+pub use checkpoint::{
+    InMemoryRoutedStore, ROUTED_CHECKPOINT_VERSION, RoutedCheckpoint, RoutedCheckpointStatus,
+    RoutedRecord, RoutedStore,
+};
 pub use error::{RoutedConfigError, RoutedError, RoutedFailure};
 pub use event::RoutedEvent;
 pub use streaming::{RoutedEventStream, RoutedStreamFuture};
@@ -37,16 +42,17 @@ pub type RoutedFuture<'a> =
 /// agent; agent names need not be unique because route keys identify selections.
 ///
 /// Runs, streams and clones share one lock across ALL routes and one interrupt
-/// handle. Each
-/// target retains its own memory and durable state: no history is combined and
-/// no child state is restored by this pipeline. Avoid independently running the
+/// handle. Each target retains its own memory and durable state: no history is
+/// combined and no child state is restored by this pipeline. Avoid independently running the
 /// same target agents while using this orchestrator. Shared backing memories
 /// cannot be detected through `dyn Agent`.
 ///
-/// Runs and streams have no route checkpoint, automatic resume, retry or
-/// rollback. Pending tool confirmation and uncertain execution remain original
-/// agent errors for the caller to resolve using the
-/// selected agent's own APIs; resolving them does not resume an orchestration.
+/// Ordinary runs and streams have no route checkpoint. Non-streaming
+/// checkpointed runs fence dispatch with revisioned storage and resume only
+/// undispatched work. No operation automatically retries, restores child state
+/// or rolls back effects. Pending tool confirmation and uncertain execution
+/// remain original agent errors for the caller to resolve using the selected
+/// agent's own APIs; resolving them does not resume an orchestration.
 #[derive(Clone)]
 pub struct RoutedPipeline {
     routes: Arc<BTreeMap<String, Stage>>,

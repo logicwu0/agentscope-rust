@@ -20,8 +20,9 @@ pub use parallel::{
     ParallelRecord, ParallelStore, ParallelStreamFuture,
 };
 pub use routed::{
+    InMemoryRoutedStore, ROUTED_CHECKPOINT_VERSION, RoutedCheckpoint, RoutedCheckpointStatus,
     RoutedConfigError, RoutedError, RoutedEvent, RoutedEventStream, RoutedFailure, RoutedFuture,
-    RoutedOutput, RoutedPipeline, RoutedStreamFuture,
+    RoutedOutput, RoutedPipeline, RoutedRecord, RoutedStore, RoutedStreamFuture,
 };
 
 use crate::{

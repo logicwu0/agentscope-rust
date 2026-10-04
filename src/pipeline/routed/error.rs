@@ -41,6 +41,10 @@ pub enum RoutedFailure {
     Interrupted,
     /// The original error, including confirmation or uncertain tool execution.
     Agent(Box<AgentError>),
+    /// Storage failed or conflicted; inspect the authoritative record before retrying.
+    Store(String),
+    /// Missing, invalid, incompatible or already dispatched checkpoint progress.
+    UnsafeResume(String),
 }
 
 /// Diagnostic failure attributed to the caller's requested route.
@@ -49,9 +53,11 @@ pub enum RoutedFailure {
 /// agent's own state and external effects before any retry or reconciliation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RoutedError {
-    /// Exact requested key, including an unknown key.
+    /// Exact requested or stored route key, including an unknown key. Empty when
+    /// a checkpoint operation has not obtained its saved selection yet.
     pub route: String,
-    /// Captured target name; `None` only when the route is unknown.
+    /// Captured target name when the requested or saved selection is available.
+    /// `None` for unknown routes and checkpoint failures before loading selection.
     pub agent_name: Option<String>,
     pub cause: RoutedFailure,
 }
@@ -71,6 +77,10 @@ impl fmt::Display for RoutedError {
                 f.write_str(" interrupted; prior effects are not rolled back")
             }
             RoutedFailure::Agent(error) => write!(f, " stopped: {error}"),
+            RoutedFailure::Store(reason) => write!(f, " checkpoint storage failed: {reason}"),
+            RoutedFailure::UnsafeResume(reason) => {
+                write!(f, " cannot resume or reconcile: {reason}")
+            }
         }
     }
 }

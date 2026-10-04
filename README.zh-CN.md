@@ -633,8 +633,40 @@ Agent；即使其他 route 正忙，也仍返回未知路由错误。
 
 路由终态事件发出前会释放共享运行锁。丢弃流也释放锁并取消所选任务，但不补发终态、
 回滚副作用或重试；Pipeline 中断不会调用子 Agent 的中断句柄。需要 Agent 完成收尾时，
-应读取到终止事件。路由检查点/恢复、模型自动选择与 Leader/Member 任务委派仍在 TODO。
+应读取到终止事件。路由带检查点的流式执行、模型自动选择与 Leader/Member 任务委派仍在 TODO。
 流式离线示例：`cargo run --example routed_pipeline_stream`。
+
+### 非流式路由检查点
+
+`run_checkpointed(&store, key, route, input)` 在未使用的 key 下启动新运行。
+未知 route 在获取运行锁及访问存储前拒绝。检查点原样记录精确 route、构造时捕获的
+Agent 名称和输入，初始为 `Ready`；调用所选 Agent 前先提交 `InFlight`。
+原始回复或 Agent 错误分别保存为 `Completed(message)` 或 `Failed(error)`，
+保存成功才返回结果。终态已观察到后，即使保存期间到达中断，也不会改写该终态。
+这些操作与 `run`、`stream` 及克隆共享运行锁。
+
+`RoutedStore` 使用带 revision 的 CAS 写入。`InMemoryRoutedStore` 仅进程内有效；
+`agentscope-state-sqlite` 插件的 `SQLiteRoutedStore` 使用独立表实现重启恢复。
+路由检查点不是 Agent 状态快照，每个子 Agent 仍需独立 Memory 和持久化 `StateKey`。
+输入、回复和错误可能包含私有数据，存储访问控制应与 Agent 状态一致。
+
+`resume_checkpointed(&store, key)` 只执行 `Ready`，沿用已存 route 和原始输入，
+不接受替换 route。恢复校验正 revision、格式版本、非空白 route/名称，以及当前所选
+route 对应的捕获名称；其他 route 可以变化。名称只提供符号兼容性，不证明模型、
+凭证、策略或 Agent 状态相同。已提交终态通过 `record.checkpoint.finished_result()`
+读取；`Completed` 和 `Failed` 都不能恢复执行或自动重试。
+
+提交执行标记后中断或丢弃运行，会保留 `InFlight`，即使 Agent 尚未真正调用。
+此状态必须显式核对才能继续，不能自动重放。存储写入会等待确认，不与中断抢占。
+失败或被取消的写入可能已经提交；核对前需重新读取实际记录，错误诊断不授权重试副作用。
+
+先停止原工作进程或通过外部机制隔离其执行，再独立核实外部结果并处理所选 Agent 自身状态，然后调用
+`reconcile_checkpointed(&store, key, inspected_revision, verified_reply)`。
+只允许用名称匹配所选 Agent 的完整 Assistant 消息替换 `InFlight` 或 `Failed`；
+陈旧 revision、`Ready` 和 `Completed` 都拒绝。此提交不会调用 Agent/工具、批准工具、
+重试或恢复子 Agent 状态。工具待确认及执行不确定错误保留为 `Failed`，需要先通过
+原 Agent API 处理，再提交核实后的最终回复。离线示例使用没有真实外部副作用的本地
+gate 模型：`cargo run --example routed_pipeline_checkpoint`。
 
 ## 路线图 / TODO
 
@@ -727,7 +759,8 @@ Agent；即使其他 route 正忙，也仍返回未知路由错误。
 - [x] 并行带检查点的流式执行、已提交分支结果与安全恢复
 - [x] 显式非流式路由、精确 route 查找与原样消息传递
 - [x] 路由流式事件、惰性的单 Agent 分发与原始终态结果
-- [ ] 路由持久化检查点/恢复
+- [x] 非流式路由检查点、SQLite 持久化、安全恢复与显式结果核对
+- [ ] 路由带检查点的流式执行与安全恢复
 - [ ] 模型驱动的 route 选择与 Leader/Member 任务委派
 
 ### 存储插件

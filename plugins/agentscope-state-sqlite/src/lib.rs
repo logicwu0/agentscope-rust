@@ -2,8 +2,10 @@
 
 mod parallel;
 mod pipeline;
+mod routed;
 pub use parallel::SQLiteParallelStore;
 pub use pipeline::SQLitePipelineStore;
+pub use routed::SQLiteRoutedStore;
 
 use agentscope::{
     AgentState, StateKey, StateRecord, StateStore, StateStoreError, StateStoreFuture,

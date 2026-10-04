@@ -11,16 +11,17 @@ pub mod pipeline;
 pub mod tool;
 
 pub use pipeline::{
-    InMemoryParallelStore, InMemoryPipelineStore, PARALLEL_CHECKPOINT_VERSION,
+    InMemoryParallelStore, InMemoryPipelineStore, InMemoryRoutedStore, PARALLEL_CHECKPOINT_VERSION,
     PIPELINE_CHECKPOINT_VERSION, ParallelBranchCheckpoint, ParallelBranchOutcome,
     ParallelBranchResult, ParallelCheckpoint, ParallelError, ParallelEvent, ParallelEventStream,
     ParallelFailure, ParallelFuture, ParallelOutput, ParallelPipeline, ParallelRecord,
     ParallelStore, ParallelStreamFuture, PipelineCheckpoint, PipelineCheckpointStatus,
     PipelineConfigError, PipelineError, PipelineEvent, PipelineEventStream, PipelineFailure,
     PipelineFuture, PipelineOutput, PipelineRecord, PipelineStep, PipelineStore,
-    PipelineStoreError, PipelineStoreFuture, PipelineStreamFuture, RoutedConfigError, RoutedError,
-    RoutedEvent, RoutedEventStream, RoutedFailure, RoutedFuture, RoutedOutput, RoutedPipeline,
-    RoutedStreamFuture, SequentialPipeline,
+    PipelineStoreError, PipelineStoreFuture, PipelineStreamFuture, ROUTED_CHECKPOINT_VERSION,
+    RoutedCheckpoint, RoutedCheckpointStatus, RoutedConfigError, RoutedError, RoutedEvent,
+    RoutedEventStream, RoutedFailure, RoutedFuture, RoutedOutput, RoutedPipeline, RoutedRecord,
+    RoutedStore, RoutedStreamFuture, SequentialPipeline,
 };
 
 pub use agent::{

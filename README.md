@@ -791,9 +791,52 @@ The shared run lock is released before the routed terminal event is emitted.
 Dropping the stream releases it and cancels the selected operation without
 synthesizing a terminal event, rolling back effects or retrying. Pipeline
 interruption does not call the child's interrupt handle. Consume to the terminal
-event when agent finalization matters. Route checkpoints/resume, model-driven
+event when agent finalization matters. Checkpointed routing streams, model-driven
 selection and leader/member delegation remain TODO. Offline streaming demo:
 `cargo run --example routed_pipeline_stream`.
+
+### Non-streaming routed checkpoints
+
+`run_checkpointed(&store, key, route, input)` starts a new run at an unused key.
+Unknown routes are rejected before acquiring the run lock or accessing storage.
+The checkpoint records the exact route, captured agent name and original input:
+all are retained unchanged. It starts `Ready`, then commits `InFlight` before
+invoking the selected agent. A reply or original agent error becomes
+`Completed(message)` or `Failed(error)` and is saved before the result is returned.
+Once observed, the terminal outcome is retained even if a late interrupt arrives
+while saving it. Checkpoint operations share the lock with `run`, `stream` and clones.
+
+`RoutedStore` uses revision-checked compare-and-swap writes. `InMemoryRoutedStore`
+is process-local; the `agentscope-state-sqlite` plugin's `SQLiteRoutedStore` keeps
+route records in separate tables for restart recovery. A route checkpoint is not
+an agent snapshot: keep each child's own memory and durable `StateKey` independent.
+Input, replies and errors may contain private data, so protect these records like
+agent state.
+
+`resume_checkpointed(&store, key)` executes only `Ready` progress, using its
+stored route and unchanged input; it has no replacement-route argument. Validation
+checks the positive revision, format, nonblank route/name and the current selected
+route's captured agent name. Other routes may change. Names provide symbolic
+compatibility, not proof of identical model, credentials, policy or agent state.
+Read a committed terminal result with `record.checkpoint.finished_result()`;
+`Completed` and `Failed` records cannot be resumed or automatically retried.
+
+Interruption or dropping a run after its fence leaves `InFlight`, even if no
+agent call actually occurred. Such progress cannot be resumed without explicit
+reconciliation. Store writes are awaited rather than raced against interruption.
+A failed or cancelled write can be ambiguous: reload the actual record before
+reconciling; error diagnostics are not authorization to replay observed effects.
+
+Stop or externally fence the original worker before independently verifying
+external effects and resolving the selected agent's own state, then call
+`reconcile_checkpointed(&store, key, inspected_revision, verified_reply)`.
+Only `InFlight` or `Failed` can be replaced, using a complete Assistant message
+named for the selected agent. Stale revisions, `Ready` and `Completed` are
+rejected. This submission does not call an agent/tool, approve tools, retry work
+or restore child state. Confirmation and uncertain-execution errors remain
+`Failed`: resolve them through the original agent's APIs before submitting its
+verified final reply. The offline demo uses a local gated mock with no real
+external side effects: `cargo run --example routed_pipeline_checkpoint`.
 
 ## Roadmap / TODO
 
@@ -887,7 +930,8 @@ after they have been exercised by working examples.
 - [x] Parallel checkpointed streaming with committed branch outcomes and safe resume
 - [x] Explicit non-streaming routing with exact route lookup and unchanged messages
 - [x] Routed streaming events with lazy single-agent dispatch and original terminal outcomes
-- [ ] Routed durable checkpoints/resume
+- [x] Non-streaming routed checkpoints, SQLite persistence, safe resume and explicit reconciliation
+- [ ] Routed checkpointed streaming and safe resume
 - [ ] Model-driven route selection and leader/member delegation
 
 ### Storage Plugins
