@@ -735,7 +735,7 @@ needed. Poll through the terminal event for agent state finalization. The offlin
 streaming interruption/resume demo is
 `cargo run --example parallel_pipeline_checkpoint_stream`.
 
-### Explicit non-streaming agent routing
+### Explicit agent routing
 
 `RoutedPipeline` dispatches a caller-selected route to exactly one agent:
 
@@ -765,10 +765,35 @@ do not use the same agents concurrently elsewhere.
 Agent failures retain their original `AgentError`, including confirmation and
 uncertain tool execution. Keep the original agent handle to approve or reconcile
 its checkpoint through the agent API. The router does not automatically continue
-the paused reply or retry it. This first version provides caller-selected
-non-streaming dispatch; routing streams/checkpoints, model-driven selection and
-leader/member delegation remain TODO. Offline demo:
+the paused reply or retry it. Offline non-streaming demo:
 `cargo run --example routed_pipeline`.
+
+`pipeline.stream(route, input).await?` validates the exact route and reserves the
+same lock as `run`, including across clones, without invoking an agent. Its first
+poll emits `RoutedEvent::RouteStarted`; only a later poll invokes the selected
+agent's stream. If interrupted after preparation but before the first poll, it
+emits routed `Error` without `RouteStarted`. The start event records selection,
+not a guarantee that the agent has been or will be invoked. Unknown routes
+return `UnknownRoute` before lock acquisition,
+with no start event, fallback or agent call, even while another route is busy.
+
+Original `AgentEvent` values are wrapped with the route and captured agent name.
+An agent `Finished`, `Error` or `ToolConfirmationRequired` is forwarded unchanged,
+then followed by exactly one routed `Finished` or `Error`; the router does not
+consume events after the agent's terminal event. A startup error, stream-item
+error or stream ending without a terminal event produces routed `Error`.
+Already observed agent terminal results are preserved if interruption arrives
+between yields. The final reply retains all content and metadata, so consumers
+should select visible text rather than display every event or serialize the
+complete output to public logs.
+
+The shared run lock is released before the routed terminal event is emitted.
+Dropping the stream releases it and cancels the selected operation without
+synthesizing a terminal event, rolling back effects or retrying. Pipeline
+interruption does not call the child's interrupt handle. Consume to the terminal
+event when agent finalization matters. Route checkpoints/resume, model-driven
+selection and leader/member delegation remain TODO. Offline streaming demo:
+`cargo run --example routed_pipeline_stream`.
 
 ## Roadmap / TODO
 
@@ -861,7 +886,8 @@ after they have been exercised by working examples.
 - [x] Non-streaming parallel checkpoints, SQLite persistence, safe resume and branch reconciliation
 - [x] Parallel checkpointed streaming with committed branch outcomes and safe resume
 - [x] Explicit non-streaming routing with exact route lookup and unchanged messages
-- [ ] Routed streaming events and durable checkpoints/resume
+- [x] Routed streaming events with lazy single-agent dispatch and original terminal outcomes
+- [ ] Routed durable checkpoints/resume
 - [ ] Model-driven route selection and leader/member delegation
 
 ### Storage Plugins

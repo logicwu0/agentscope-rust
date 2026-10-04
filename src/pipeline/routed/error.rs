@@ -35,7 +35,7 @@ impl std::error::Error for RoutedConfigError {}
 pub enum RoutedFailure {
     /// The exact route key is unregistered; no target was invoked.
     UnknownRoute,
-    /// Another route run on this pipeline or a clone holds the shared lock.
+    /// Another run or stream on this pipeline or a clone holds the shared lock.
     Busy,
     /// The pipeline interrupted the active reply; effects may be uncertain.
     Interrupted,

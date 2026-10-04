@@ -20,7 +20,8 @@ pub use parallel::{
     ParallelRecord, ParallelStore, ParallelStreamFuture,
 };
 pub use routed::{
-    RoutedConfigError, RoutedError, RoutedFailure, RoutedFuture, RoutedOutput, RoutedPipeline,
+    RoutedConfigError, RoutedError, RoutedEvent, RoutedEventStream, RoutedFailure, RoutedFuture,
+    RoutedOutput, RoutedPipeline, RoutedStreamFuture,
 };
 
 use crate::{

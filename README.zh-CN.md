@@ -590,7 +590,7 @@ Agent 配置不兼容时拒绝恢复。新运行使用新 key；全部终态的�
 Agent 状态保存。流式中断与恢复离线示例：
 `cargo run --example parallel_pipeline_checkpoint_stream`。
 
-### 显式选择 Agent 的非流式路由
+### 显式选择 Agent 的路由
 
 `RoutedPipeline` 根据调用方指定的 route，仅调用一个 Agent：
 
@@ -615,8 +615,26 @@ Agent 名称和原始 `message`。输入与回复均原样传递，保留思考�
 
 失败保留原始 `AgentError`，包括工具待确认和执行结果不确定。调用方需保留原 Agent
 引用，通过 Agent API 批准或核对其检查点；路由器不会自动续接暂停的回复或重试。
-本版本提供调用方显式选择的非流式分发；路由流式事件/检查点、模型自动选择与
-Leader/Member 任务委派仍在 TODO。离线示例：`cargo run --example routed_pipeline`。
+非流式离线示例：`cargo run --example routed_pipeline`。
+
+`pipeline.stream(route, input).await?` 精确校验路由，占用与 `run` 及克隆共享的运行锁，
+但不调用 Agent。首次轮询只发出 `RoutedEvent::RouteStarted`，后续轮询才调用所选
+Agent 的流。准备后、首次轮询前若已中断，则直接发出路由 `Error`，不发 `RouteStarted`。
+开始事件只表示已选择路由，不保证 Agent 已经或将会调用。未知路由在获取锁前返回
+`UnknownRoute`，不发开始事件、不回退也不调用
+Agent；即使其他 route 正忙，也仍返回未知路由错误。
+
+原始 `AgentEvent` 以 route 和构造时记录的 Agent 名称包装。Agent 的 `Finished`、
+`Error` 或 `ToolConfirmationRequired` 原样转发后，再发出唯一一个路由终态 `Finished`
+或 `Error`，不读取 Agent 终态后的尾部事件。启动失败、流内错误或没有终态就结束的流
+均产生路由 `Error`。已经观察到的 Agent 终态不会被两次事件之间到达的中断覆盖。
+最终回复完整保留内容与元数据，消费者应选择公开文本展示，不应整体公开记录所有
+事件或序列化完整输出。
+
+路由终态事件发出前会释放共享运行锁。丢弃流也释放锁并取消所选任务，但不补发终态、
+回滚副作用或重试；Pipeline 中断不会调用子 Agent 的中断句柄。需要 Agent 完成收尾时，
+应读取到终止事件。路由检查点/恢复、模型自动选择与 Leader/Member 任务委派仍在 TODO。
+流式离线示例：`cargo run --example routed_pipeline_stream`。
 
 ## 路线图 / TODO
 
@@ -708,7 +726,8 @@ Leader/Member 任务委派仍在 TODO。离线示例：`cargo run --example rout
 - [x] 非流式并行检查点、SQLite 持久化、安全恢复与分支结果核对
 - [x] 并行带检查点的流式执行、已提交分支结果与安全恢复
 - [x] 显式非流式路由、精确 route 查找与原样消息传递
-- [ ] 路由流式事件与持久化检查点/恢复
+- [x] 路由流式事件、惰性的单 Agent 分发与原始终态结果
+- [ ] 路由持久化检查点/恢复
 - [ ] 模型驱动的 route 选择与 Leader/Member 任务委派
 
 ### 存储插件

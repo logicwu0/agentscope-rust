@@ -1,8 +1,12 @@
 //! Exact, caller-selected routing to one agent without fallback or broadcast.
 
 mod error;
+mod event;
+mod streaming;
 
 pub use error::{RoutedConfigError, RoutedError, RoutedFailure};
+pub use event::RoutedEvent;
+pub use streaming::{RoutedEventStream, RoutedStreamFuture};
 
 use super::Stage;
 use crate::{Agent, AgentInterruptHandle, Msg};
@@ -32,15 +36,16 @@ pub type RoutedFuture<'a> =
 /// fallback or broadcast. Different keys can intentionally alias the same
 /// agent; agent names need not be unique because route keys identify selections.
 ///
-/// Clones share one run lock across ALL routes and one interrupt handle. Each
+/// Runs, streams and clones share one lock across ALL routes and one interrupt
+/// handle. Each
 /// target retains its own memory and durable state: no history is combined and
 /// no child state is restored by this pipeline. Avoid independently running the
 /// same target agents while using this orchestrator. Shared backing memories
 /// cannot be detected through `dyn Agent`.
 ///
-/// This initial implementation is non-streaming and has no route checkpoint,
-/// automatic resume, retry or rollback. Pending tool confirmation and uncertain
-/// execution remain original agent errors for the caller to resolve using the
+/// Runs and streams have no route checkpoint, automatic resume, retry or
+/// rollback. Pending tool confirmation and uncertain execution remain original
+/// agent errors for the caller to resolve using the
 /// selected agent's own APIs; resolving them does not resume an orchestration.
 #[derive(Clone)]
 pub struct RoutedPipeline {
@@ -81,10 +86,10 @@ impl RoutedPipeline {
         })
     }
 
-    /// Interrupts the active run by dropping its reply future, without calling
-    /// the selected agent's own interrupt handle or affecting unrelated users of
-    /// that handle. Later runs capture a fresh signal baseline. Completed state
-    /// and external tool effects are not undone.
+    /// Interrupts the active run or stream by dropping its operation, without
+    /// calling the selected agent's own interrupt handle or affecting unrelated
+    /// users of that handle. Later runs/streams capture a fresh signal baseline.
+    /// Observed terminal outcomes and external tool effects are not undone.
     #[must_use]
     pub fn interrupt_handle(&self) -> AgentInterruptHandle {
         self.interrupt.clone()
