@@ -2,6 +2,7 @@
 
 mod error;
 mod selection;
+mod streaming;
 
 pub use error::{ModelRouterConfigError, RouteSelectionError};
 
@@ -27,7 +28,8 @@ pub struct RouteSelection {
 pub type RouteSelectionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<RouteSelection, RoutedError>> + Send + 'a>>;
 
-/// Non-streaming model selection over an explicit subset of registered routes.
+/// Model selection over an explicit subset of registered routes.
+/// Classification is non-streaming; the selected target can run or stream.
 ///
 /// The catalog is immutable, caller-supplied policy: keys must already exist in
 /// the supplied pipeline and descriptions must be nonblank. Only visible text
@@ -167,6 +169,9 @@ impl ModelRouter {
         input: &Msg,
         interrupt: &mut AgentInterruptToken,
     ) -> Result<RouteSelection, RoutedError> {
+        if interrupt.is_interrupted() {
+            return Err(unselected_error(RoutedFailure::Interrupted));
+        }
         let request = self.request(input).map_err(selection_error)?;
         let response = tokio::select! {
             biased;
@@ -198,3 +203,5 @@ fn selection_error(error: RouteSelectionError) -> RoutedError {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_support;

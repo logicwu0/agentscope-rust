@@ -736,9 +736,22 @@ let output = pipeline.run_checkpointed(&store, key, selected.route, input).await
 ```
 
 该检查点保存已选 route，恢复时不重新分类。`ModelRouter::run` 只返回所选 Agent 的
-`RoutedOutput`，不把分类模型 Token 累加到 Agent 用量。自动选路的流式/检查点 API
+`RoutedOutput`，不把分类模型 Token 累加到 Agent 用量。自动选路的检查点 API
 及 Leader/Member 任务委派仍在 TODO。离线示例：
 `cargo run --example model_routed_pipeline`。
+
+`ModelRouter::stream(input).await?` 占用同一个共享锁，准备阶段不调用分类模型或 Agent。
+首次轮询事件时进行一次非流式分类；选路成功发出 `RouteStarted`，后续轮询才启动
+所选 Agent 的流，原始消息完整传入。选路失败仅发出一个未归属 route 的路由 `Error`，
+没有开始事件或 Agent 调用。准备阶段只返回 `Busy`，其他错误通过事件报告。
+
+流复用 `RoutedEvent`，所选 Agent 的事件、step 和消息保持原样，分类模型的输出、
+思考和用量不加入 Agent 事件。选路和流式执行共用锁与同一中断基线；分类前、Agent
+启动前以及恢复轮询时，已观察到的中断优先。已经观察到的 Agent 终态不会被稍晚的
+中断覆盖。路由终态发出前释放共享锁，即使调用方保留流而不轮询 EOF，也不阻塞后续
+操作。丢弃流停止本地轮询，不补发终态、不回滚或自动重放。需要 Agent 状态完成收尾时，
+应读取到路由终态。这个 API 不创建检查点。离线流式示例：
+`cargo run --example model_routed_pipeline_stream`。
 
 ## 路线图 / TODO
 
@@ -834,7 +847,8 @@ let output = pipeline.run_checkpointed(&store, key, selected.route, input).await
 - [x] 非流式路由检查点、SQLite 持久化、安全恢复与显式结果核对
 - [x] 路由带检查点的流式执行与安全恢复
 - [x] 基础非流式模型辅助路由选择与严格本地白名单
-- [ ] 自动选路流式执行及选路检查点/恢复
+- [x] 模型自动选路流式执行、共享中断与原始事件转发
+- [ ] 自动选路检查点/恢复
 - [ ] Leader/Member 任务委派
 
 ### 存储插件

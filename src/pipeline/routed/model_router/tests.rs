@@ -1,3 +1,4 @@
+use super::tests_support as support;
 use super::*;
 use crate::*;
 use futures_util::FutureExt;
@@ -6,8 +7,6 @@ use std::{
     error::Error as _,
     sync::{Arc, atomic::Ordering},
 };
-#[path = "tests_support.rs"]
-mod support;
 use support::*;
 
 #[test]

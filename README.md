@@ -924,9 +924,27 @@ let output = pipeline.run_checkpointed(&store, key, selected.route, input).await
 
 This checkpoint retains the already selected route; recovery does not rerun the
 classifier. `ModelRouter::run` returns the worker's `RoutedOutput` and does not add
-selector tokens to worker usage. Automatic selection streaming/checkpoint APIs
-and leader/member delegation remain TODO. Offline example:
+selector tokens to worker usage. Automatic selection checkpoint APIs and
+leader/member delegation remain TODO. Offline example:
 `cargo run --example model_routed_pipeline`.
+
+`ModelRouter::stream(input).await?` reserves the same shared lock without calling
+the selector or an agent. The first event poll performs one non-streaming
+classification. Successful selection emits `RouteStarted`; a later poll invokes
+the selected target's stream with the original message. Selection failures emit
+one unattributed routed `Error` with no start event or worker call. Preparation
+returns only `Busy`; other failures arrive as events.
+
+The stream reuses `RoutedEvent`: original target events and step numbers remain
+unchanged. Selector output, thinking and usage are not added to worker events.
+Selection and streaming retain the same lock and interrupt baseline. Already
+observed interruption wins before classification, target startup and resumed
+event polls; an observed target terminal survives a later interrupt. The shared
+lock is released before the routed terminal event, even if the caller keeps the
+stream without polling EOF. Dropping stops local polling without a synthetic
+terminal, rollback or replay. Consume through the routed terminal for target
+state finalization. This API creates no checkpoint. Offline streaming example:
+`cargo run --example model_routed_pipeline_stream`.
 
 ## Roadmap / TODO
 
@@ -1023,7 +1041,8 @@ after they have been exercised by working examples.
 - [x] Non-streaming routed checkpoints, SQLite persistence, safe resume and explicit reconciliation
 - [x] Routed checkpointed streaming and safe resume
 - [x] Basic non-streaming model-assisted route selection with strict local allowlists
-- [ ] Automatic selection streaming and checkpointed selection/recovery
+- [x] Model-selected target streaming with shared cancellation and original events
+- [ ] Checkpointed automatic selection/recovery
 - [ ] Leader/member delegation
 
 ### Storage Plugins

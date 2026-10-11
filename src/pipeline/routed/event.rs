@@ -1,4 +1,4 @@
-//! Serializable lifecycle of one explicitly selected agent stream.
+//! Serializable lifecycle of one selected agent stream.
 
 use super::{RoutedError, RoutedOutput};
 use crate::AgentEvent;
@@ -16,7 +16,7 @@ pub enum RoutedEvent {
     /// The route is selected; the agent operation has not yet been invoked.
     /// Checkpointed streams have committed the `InFlight` dispatch fence.
     RouteStarted {
-        /// Exact caller-selected route key.
+        /// Exact validated route key, selected by the caller or model router.
         route: String,
         /// Agent name captured when constructing the pipeline.
         agent_name: String,
@@ -25,7 +25,7 @@ pub enum RoutedEvent {
     /// In checkpointed streams, even an agent terminal event is an observation,
     /// not a durable acknowledgement; consume the routed terminal event.
     Agent {
-        /// Exact caller-selected route key.
+        /// Exact validated route key, selected by the caller or model router.
         route: String,
         /// Agent name captured when constructing the pipeline.
         agent_name: String,

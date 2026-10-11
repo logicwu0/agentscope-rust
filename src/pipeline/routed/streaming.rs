@@ -1,17 +1,19 @@
 //! Lazy selected-agent streams, driven entirely by consumer polling.
 
 use super::{RoutedError, RoutedEvent, RoutedFailure, RoutedOutput, RoutedPipeline};
-use crate::{AgentError, AgentEvent, Msg};
+use crate::{AgentError, AgentEvent, Msg, agent::AgentInterruptToken, pipeline::Stage};
 use async_stream::stream;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use std::{future::Future, pin::Pin};
+use tokio::sync::MutexGuard;
 
 /// Selected-route events. Runtime failures become terminal event values.
 pub type RoutedEventStream<'a> = Pin<Box<dyn Stream<Item = RoutedEvent> + Send + 'a>>;
 
 /// Lazy route validation and shared-lock reservation; no agent runs here.
 /// Checkpointed methods also create or validate stored progress during preparation.
+/// Model-router streams defer classification until their first event poll.
 pub type RoutedStreamFuture<'a> =
     Pin<Box<dyn Future<Output = Result<RoutedEventStream<'a>, RoutedError>> + Send + 'a>>;
 
@@ -55,69 +57,78 @@ impl RoutedPipeline {
                 .operation
                 .try_lock()
                 .map_err(|_| attributed_error(&route, &stage.name, RoutedFailure::Busy))?;
-            let mut interrupt = self.interrupt.token();
-            Ok(Box::pin(stream! {
-                let outcome = if interrupt.is_interrupted() {
-                    Err(RoutedFailure::Interrupted)
-                } else {
-                    yield RoutedEvent::RouteStarted {
-                        route: route.clone(), agent_name: stage.name.clone(),
-                    };
-                    let opened = tokio::select! {
-                        biased;
-                        () = interrupt.cancelled() => Err(RoutedFailure::Interrupted),
-                        // Delay even synchronous stream() side effects until polled.
-                        opened = async { stage.agent.stream(input).await } => opened
-                            .map_err(|error| RoutedFailure::Agent(Box::new(error))),
-                    };
-                    match opened {
-                        Err(cause) => Err(cause),
-                        Ok(mut events) => loop {
-                            let item = tokio::select! {
-                                biased;
-                                () = interrupt.cancelled() => break Err(RoutedFailure::Interrupted),
-                                item = events.next() => item,
-                            };
-                            match item {
-                                None => break Err(RoutedFailure::Agent(Box::new(
-                                    AgentError::InvalidModelResponse(
-                                        "agent stream ended without a terminal event".into(),
-                                    ),
-                                ))),
-                                Some(Err(error)) => break Err(RoutedFailure::Agent(Box::new(error))),
-                                Some(Ok(event)) => {
-                                    if let Some(outcome) = terminal_outcome(&event) {
-                                        // Finalization has already produced a terminal
-                                        // observation; never poll its tail or overwrite
-                                        // that observation after the yield boundary.
-                                        drop(events);
-                                        yield RoutedEvent::Agent {
-                                            route: route.clone(), agent_name: stage.name.clone(), event,
-                                        };
-                                        break outcome;
-                                    }
-                                    yield RoutedEvent::Agent {
-                                        route: route.clone(), agent_name: stage.name.clone(), event,
-                                    };
-                                }
-                            }
-                        },
-                    }
-                };
-                // A consumer retaining the terminal stream must not block a
-                // later explicit run while waiting to poll EOF or drop it.
-                drop(guard);
-                yield match outcome {
-                    Ok(message) => RoutedEvent::Finished { output: RoutedOutput {
-                        route, agent_name: stage.name.clone(), message,
-                    } },
-                    Err(cause) => RoutedEvent::Error {
-                        error: attributed_error(&route, &stage.name, cause),
-                    },
-                };
-            }) as RoutedEventStream<'_>)
+            let interrupt = self.interrupt.token();
+            Ok(selected_event_stream(stage, route, input, guard, interrupt))
         })
     }
+}
+
+/// Keeps explicit and model-selected target streams on the same execution path.
+pub(super) fn selected_event_stream<'a>(
+    stage: &'a Stage,
+    route: String,
+    input: Msg,
+    guard: MutexGuard<'a, ()>,
+    mut interrupt: AgentInterruptToken,
+) -> RoutedEventStream<'a> {
+    Box::pin(stream! {
+        let outcome = if interrupt.is_interrupted() {
+            Err(RoutedFailure::Interrupted)
+        } else {
+            yield RoutedEvent::RouteStarted {
+                route: route.clone(), agent_name: stage.name.clone(),
+            };
+            let opened = tokio::select! {
+                biased;
+                () = interrupt.cancelled() => Err(RoutedFailure::Interrupted),
+                // Delay even synchronous stream() side effects until polled.
+                opened = async { stage.agent.stream(input).await } => opened
+                    .map_err(|error| RoutedFailure::Agent(Box::new(error))),
+            };
+            match opened {
+                Err(cause) => Err(cause),
+                Ok(mut events) => loop {
+                    let item = tokio::select! {
+                        biased;
+                        () = interrupt.cancelled() => break Err(RoutedFailure::Interrupted),
+                        item = events.next() => item,
+                    };
+                    match item {
+                        None => break Err(RoutedFailure::Agent(Box::new(
+                            AgentError::InvalidModelResponse(
+                                "agent stream ended without a terminal event".into(),
+                            ),
+                        ))),
+                        Some(Err(error)) => break Err(RoutedFailure::Agent(Box::new(error))),
+                        Some(Ok(event)) => {
+                            if let Some(outcome) = terminal_outcome(&event) {
+                                // Keep an observed terminal across the yield gap;
+                                // never poll the child's tail or overwrite it.
+                                drop(events);
+                                yield RoutedEvent::Agent {
+                                    route: route.clone(), agent_name: stage.name.clone(), event,
+                                };
+                                break outcome;
+                            }
+                            yield RoutedEvent::Agent {
+                                route: route.clone(), agent_name: stage.name.clone(), event,
+                            };
+                        }
+                    }
+                },
+            }
+        };
+        // Retaining a terminal stream must not block later explicit work.
+        drop(guard);
+        yield match outcome {
+            Ok(message) => RoutedEvent::Finished { output: RoutedOutput {
+                route, agent_name: stage.name.clone(), message,
+            } },
+            Err(cause) => RoutedEvent::Error {
+                error: attributed_error(&route, &stage.name, cause),
+            },
+        };
+    })
 }
 
 fn attributed_error(route: &str, name: &str, cause: RoutedFailure) -> RoutedError {
