@@ -28,7 +28,10 @@ impl AgentInterruptHandle {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    pub(crate) fn token(&self) -> AgentInterruptToken {
+    /// Captures an operation-scoped cancellation token. Capture before starting work;
+    /// later operations are not cancelled by earlier interrupt requests.
+    #[must_use]
+    pub fn token(&self) -> AgentInterruptToken {
         let receiver = self.generation.subscribe();
         let baseline = *receiver.borrow();
         AgentInterruptToken { receiver, baseline }
@@ -41,18 +44,26 @@ impl Default for AgentInterruptHandle {
     }
 }
 
+/// Operation-scoped cancellation signal for custom agent implementations.
+/// Keep a handle alive while waiting; dropping a future does not undo tool effects.
 #[derive(Clone, Debug)]
-pub(crate) struct AgentInterruptToken {
+pub struct AgentInterruptToken {
     receiver: watch::Receiver<u64>,
     baseline: u64,
 }
 
 impl AgentInterruptToken {
-    pub(crate) fn is_interrupted(&self) -> bool {
+    /// Reports whether an interrupt occurred since this token was captured.
+    #[must_use]
+    pub fn is_interrupted(&self) -> bool {
         *self.receiver.borrow() != self.baseline
     }
 
-    pub(crate) async fn cancelled(&mut self) {
+    /// Waits until an interrupt occurs.
+    ///
+    /// # Panics
+    /// Panics if all interrupt handles are dropped before cancellation.
+    pub async fn cancelled(&mut self) {
         while !self.is_interrupted() {
             self.receiver
                 .changed()

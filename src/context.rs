@@ -4,7 +4,11 @@ use std::{collections::BTreeMap, fmt, num::NonZeroUsize};
 
 use crate::{ContentBlock, Msg, Role};
 
+mod augmentation;
 mod budget;
+pub use augmentation::{
+    ContextAugmentationError, ContextAugmentationFuture, ContextAugmenter, ContextInput,
+};
 mod offload;
 mod summary;
 pub use budget::{

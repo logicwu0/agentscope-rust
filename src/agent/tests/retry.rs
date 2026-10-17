@@ -42,7 +42,7 @@ fn retry_after_restore_reuses_keys_and_preserves_denials_in_both_modes() {
         let tool = Arc::new(MockTool::new(calculator_definition()).with_output("42"));
         let mut registry = ToolRegistry::new();
         registry.register_shared(tool.clone()).unwrap();
-        let agent: Arc<dyn Agent> = Arc::new(
+        let agent: Arc<dyn crate::RecoverableAgent> = Arc::new(
             ReActAgent::new(
                 "Friday",
                 MockChatModel::new("mock")

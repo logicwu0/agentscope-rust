@@ -1,5 +1,6 @@
 //! Agent interfaces and built-in implementations.
 
+mod capabilities;
 mod confirmation;
 mod event;
 mod hook;
@@ -14,19 +15,18 @@ use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Msg,
     memory::MemoryError,
     model::{ChatStreamError, ModelError},
     tool::ToolError,
 };
 
+pub use capabilities::{Agent, ContextManagedAgent, RecoverableAgent, StatefulAgent};
 pub use confirmation::{
     PendingToolCalls, PendingToolExecution, ToolConfirmation, ToolConfirmationDecision,
 };
 pub use event::AgentEvent;
 pub use hook::{AgentHook, AgentHookError, AgentHookEvent, AgentHookFuture, AgentHookResult};
-pub use interrupt::AgentInterruptHandle;
-pub(crate) use interrupt::AgentInterruptToken;
+pub use interrupt::{AgentInterruptHandle, AgentInterruptToken};
 pub use react::ReActAgent;
 pub use state::{AGENT_STATE_VERSION, AgentState};
 pub use store::{
@@ -42,78 +42,6 @@ pub type AgentFuture<'a, T> = Pin<Box<dyn Future<Output = AgentResult<T>> + Send
 
 /// A boxed asynchronous stream of agent lifecycle events.
 pub type AgentEventStream<'a> = Pin<Box<dyn Stream<Item = AgentResult<AgentEvent>> + Send + 'a>>;
-
-/// An object-safe asynchronous agent.
-pub trait Agent: Send + Sync {
-    /// Returns the agent's display name.
-    fn name(&self) -> &str;
-
-    /// Produces one reply to an input message.
-    fn reply(&self, message: Msg) -> AgentFuture<'_, Msg>;
-
-    /// Streams one reply as model, tool, and lifecycle events.
-    fn stream(&self, message: Msg) -> AgentFuture<'_, AgentEventStream<'_>>;
-
-    /// Stores an external message in conversation memory without replying.
-    fn observe(&self, message: Msg) -> AgentFuture<'_, ()>;
-
-    /// Captures a versioned snapshot of configured conversation state.
-    fn snapshot(&self) -> AgentFuture<'_, AgentState>;
-
-    /// Explicitly summarizes old completed turns, retaining at least one recent turn.
-    /// Returns `None` if there is no newly eligible prefix.
-    fn compact_context(
-        &self,
-        keep_recent_turns: usize,
-    ) -> AgentFuture<'_, Option<crate::ContextSummary>>;
-
-    /// Removes only the summary, making original history available again.
-    fn clear_context_summary(&self) -> AgentFuture<'_, ()>;
-
-    /// Atomically restores a previously captured conversation state.
-    fn restore(&self, state: AgentState) -> AgentFuture<'_, ()>;
-
-    /// Resumes a reply paused for explicit tool-call confirmation.
-    fn resume_tool_calls(
-        &self,
-        reply_id: String,
-        confirmations: Vec<ToolConfirmation>,
-    ) -> AgentFuture<'_, Msg>;
-
-    /// Resolves an execution with externally reconciled terminal tool results.
-    fn resolve_tool_execution(
-        &self,
-        reply_id: String,
-        results: Vec<crate::ToolResultBlock>,
-    ) -> AgentFuture<'_, Msg>;
-
-    /// Explicitly retries all approved calls of an uncertain execution with
-    /// their original idempotency keys. Tools must honor those keys to deduplicate effects.
-    fn retry_tool_execution(&self, reply_id: String) -> AgentFuture<'_, Msg>;
-
-    /// Approves/denies pending calls and streams tools and the continuing reply.
-    fn stream_resume_tool_calls(
-        &self,
-        reply_id: String,
-        confirmations: Vec<ToolConfirmation>,
-    ) -> AgentFuture<'_, AgentEventStream<'_>>;
-
-    /// Explicitly retries uncertain calls and streams the continuing reply.
-    fn stream_retry_tool_execution(
-        &self,
-        reply_id: String,
-    ) -> AgentFuture<'_, AgentEventStream<'_>>;
-
-    /// Supplies verified tool results and streams the continuing reply.
-    fn stream_resolve_tool_execution(
-        &self,
-        reply_id: String,
-        results: Vec<crate::ToolResultBlock>,
-    ) -> AgentFuture<'_, AgentEventStream<'_>>;
-
-    /// Returns a handle that can interrupt in-flight replies on this agent.
-    fn interrupt_handle(&self) -> AgentInterruptHandle;
-}
 
 /// A configuration or runtime agent failure.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -171,6 +99,8 @@ pub enum AgentError {
     },
     /// A lifecycle hook failed.
     Hook(AgentHookError),
+    /// Supplementary context retrieval failed before calling the model.
+    ContextAugmentation(crate::ContextAugmentationError),
     /// The caller interrupted the in-flight agent operation.
     Interrupted,
     /// The model produced a response that cannot drive the agent loop.
@@ -227,6 +157,9 @@ impl fmt::Display for AgentError {
                 "agent state belongs to {found:?}, but target agent is {expected:?}"
             ),
             Self::Hook(error) => write!(formatter, "agent lifecycle hook failed: {error}"),
+            Self::ContextAugmentation(error) => {
+                write!(formatter, "context augmentation failed: {error}")
+            }
             Self::Interrupted => formatter.write_str("agent operation was interrupted"),
             Self::InvalidModelResponse(message) => {
                 write!(formatter, "invalid model response: {message}")
@@ -251,6 +184,7 @@ impl std::error::Error for AgentError {
             Self::Memory(error) => Some(error),
             Self::StateStore(error) => Some(error),
             Self::Hook(error) => Some(error),
+            Self::ContextAugmentation(error) => Some(error),
             Self::EmptyName
             | Self::ZeroMaxSteps
             | Self::MemoryNotConfigured

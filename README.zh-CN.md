@@ -48,11 +48,11 @@ DeepSeek 在内的 OpenAI 兼容 Chat Completions API，并支持 SSE 流式响�
 事务与会话隔离能力的持久化。可序列化的 `AgentEvent` 协议覆盖模型增量、工具执行、
 步骤结束、最终回复和终止错误。`ReActAgent::stream` 现已在完整的模型—工具—模型循环中
 实时发送这些事件。只读、可作为 trait 对象使用的异步 `AgentHook` 可以按照确定的注册
-顺序观察回复、外部消息、模型和工具生命周期边界。`Agent::observe` 可以把外部消息写入
+顺序观察回复、外部消息、模型和工具生命周期边界。`StatefulAgent::observe` 可以把外部消息写入
 已配置的会话 Memory，而不会触发模型调用。可克隆的 `AgentInterruptHandle` 在模型调用、
 流式分片和工具执行周围提供协作式检查点。被中断的工具调用会生成并持久化
 `interrupted` 结果，保证后续会话状态在结构上仍然完整；但中断不会回滚工具已经产生的
-外部副作用。版本化且可序列化为 JSON 的 `AgentState` 现可通过 `Agent` trait 对象接口
+外部副作用。版本化且可序列化为 JSON 的 `AgentState` 现可通过 `StatefulAgent` trait 对象接口
 快照完整对话历史，并以原子方式恢复。运行期中断控制不会写入持久化状态。
 可作为 trait 对象使用的 `StateStore` 现会按用户和会话定位记录，通过乐观 revision
 校验保护写入，并提供线程安全的 `InMemoryStateStore`。绑定状态存储后，`ReActAgent`
@@ -227,6 +227,47 @@ cargo run -p agentscope-chat -- --user alice --session deepseek
 保存失败会返回终止错误。执行工具时丢弃流会留下待核对/重试检查点；后续模型输出期间
 丢弃流会保留工具结果，但不保存部分文本，可发送新消息继续已保存的对话。另一个进程
 重试或核对同一会话前，必须先停止原执行进程。
+
+### Agent 能力接口与迁移
+
+基础 `Agent` 现在只要求 `name`、`reply`、`stream` 和
+`interrupt_handle`，所有 Pipeline 只依赖这四个方法。
+
+| 接口 | 可选能力 |
+| --- | --- |
+| `StatefulAgent: Agent` | `observe`、`snapshot`、`restore` |
+| `ContextManagedAgent: Agent` | `compact_context`、`clear_context_summary` |
+| `RecoverableAgent: Agent` | 工具确认、结果核对、显式重试及对应流式方法 |
+
+`ReActAgent` 实现全部接口，直接方法调用保持不变。这是 trait 层面的破坏性变更：
+原有自定义 `impl Agent` 中的可选方法需移到对应 trait 的独立实现。
+调用方应保存所需能力，例如 `Arc<dyn StatefulAgent>`；`dyn Agent` 不再支持快照。
+没有运行时自动发现或“未支持”的占位实现。快照仍使用 `AgentState`，
+尚不是任意研究算法的通用状态格式。
+
+自定义 Agent 可在操作开始时用 `interrupt_handle.token()` 取得取消令牌，
+通过 `is_interrupted()` 或 `cancelled().await` 响应中断；等待期间需保留 handle。
+旧中断不影响之后新建的令牌。最小实现和三类 Pipeline 接入测试见
+`tests/agent_capabilities.rs`。
+
+### 算法上下文扩展
+
+实现 `ContextAugmenter`，通过 `with_context_augmenter` 或
+`with_shared_context_augmenter` 注册，可在每次实际模型调用前检索经验等参考文本。
+离线示例：`cargo run --example context_augmentation`，不需要 API Key。
+
+扩展只读访问已选择、摘要投影及卸载处理后的消息、Agent 名称和步骤编号；多个扩展
+按注册顺序执行，并读取相同的未增强输入。非空结果作为标注的 user 角色参考数据，
+插入系统提示/摘要之后、原始对话之前，不允许修改工具、权限或原始历史。
+补充内容固定保留并计入 token 预算，过大则在模型调用前失败；模型调用前 Hook 可看到
+最终请求。内容不写入会话或快照，但可能出现在模型请求和 Hook 日志中。
+文本标注不是防提示注入的安全保障。
+
+流式、非流式和恢复共用此路径；检索失败会终止当前模型步骤，等待中的检索可被中断。
+提供者应只读、可安全取消，并自行绑定租户/会话权限。提供者不会序列化，恢复时需要
+重新配置，且恢复会再次检索，结果可能变化。摘要生成及自动压缩预算探测不会调用扩展，
+因此后续增强输入仍可能超预算，此时直接失败，不会自动再压缩。
+本功能是算法接入点，不是规划算法、ReasoningBank 实现或 Python 服务集成。
 
 ### 模型输入上下文策略
 

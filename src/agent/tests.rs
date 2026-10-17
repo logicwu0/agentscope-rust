@@ -20,7 +20,7 @@ mod recovery_stream;
 mod retry;
 
 use crate::{
-    AGENT_STATE_VERSION, Agent, AgentError, AgentEvent, AgentHook, AgentHookError, AgentHookEvent,
+    AGENT_STATE_VERSION, AgentError, AgentEvent, AgentHook, AgentHookError, AgentHookEvent,
     AgentHookFuture, AgentInterruptHandle, AgentState, ChatEvent, ChatEventStream, ChatModel,
     ChatRequest, ChatResponse, ContentBlock, FinishReason, GenerateOptions, InMemoryMemory,
     InMemoryStateStore, Memory, MockChatModel, MockTool, ModelCapabilities, ModelError,
@@ -707,7 +707,7 @@ fn react_agent_observes_external_messages_without_calling_the_model() {
     let shared_model: Arc<dyn ChatModel> = model.clone();
     let shared_memory: Arc<dyn Memory> = memory.clone();
     let recorded = Arc::new(Mutex::new(Vec::new()));
-    let agent: Arc<dyn Agent> = Arc::new(
+    let agent: Arc<dyn crate::StatefulAgent> = Arc::new(
         ReActAgent::from_shared(
             "Friday",
             shared_model,
@@ -913,7 +913,7 @@ fn react_agent_restores_legacy_version_two_state() {
 fn agent_state_operations_are_object_safe() {
     let memory = Arc::new(InMemoryMemory::from_messages([Msg::user("Hello")]));
     let shared_memory: Arc<dyn Memory> = memory;
-    let agent: Arc<dyn Agent> = Arc::new(
+    let agent: Arc<dyn crate::StatefulAgent> = Arc::new(
         ReActAgent::new(
             "Friday",
             MockChatModel::new("mock-model"),
@@ -1138,7 +1138,7 @@ fn react_agent_is_object_safe() {
                 reason: FinishReason::Completed,
             }),
         ]);
-    let agent: Arc<dyn Agent> =
+    let agent: Arc<dyn crate::RecoverableAgent> =
         Arc::new(ReActAgent::new("Friday", model, ToolExecutor::new(ToolRegistry::new())).unwrap());
 
     let reply = block_on(agent.reply(Msg::user("Hello"))).unwrap();

@@ -103,6 +103,7 @@ impl Agent for ScriptAgent {
     fn name(&self) -> &str {
         self.name
     }
+
     fn reply(&self, input: Msg) -> AgentFuture<'_, Msg> {
         // Even creating the child future is observable and requires a durable marker.
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -124,50 +125,11 @@ impl Agent for ScriptAgent {
             self.result.clone()
         })
     }
+
     fn stream(&self, _: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
         panic!("unexpected child stream invocation")
     }
-    fn observe(&self, _: Msg) -> AgentFuture<'_, ()> {
-        panic!("unexpected operation")
-    }
-    fn snapshot(&self) -> AgentFuture<'_, AgentState> {
-        panic!("unexpected operation")
-    }
-    fn compact_context(&self, _: usize) -> AgentFuture<'_, Option<ContextSummary>> {
-        panic!("unexpected operation")
-    }
-    fn clear_context_summary(&self) -> AgentFuture<'_, ()> {
-        panic!("unexpected operation")
-    }
-    fn restore(&self, _: AgentState) -> AgentFuture<'_, ()> {
-        panic!("unexpected child restoration")
-    }
-    fn resume_tool_calls(&self, _: String, _: Vec<ToolConfirmation>) -> AgentFuture<'_, Msg> {
-        panic!("unexpected automatic confirmation")
-    }
-    fn resolve_tool_execution(&self, _: String, _: Vec<ToolResultBlock>) -> AgentFuture<'_, Msg> {
-        panic!("unexpected operation")
-    }
-    fn retry_tool_execution(&self, _: String) -> AgentFuture<'_, Msg> {
-        panic!("unexpected automatic retry")
-    }
-    fn stream_resume_tool_calls(
-        &self,
-        _: String,
-        _: Vec<ToolConfirmation>,
-    ) -> AgentFuture<'_, AgentEventStream<'_>> {
-        panic!("unexpected operation")
-    }
-    fn stream_retry_tool_execution(&self, _: String) -> AgentFuture<'_, AgentEventStream<'_>> {
-        panic!("unexpected operation")
-    }
-    fn stream_resolve_tool_execution(
-        &self,
-        _: String,
-        _: Vec<ToolResultBlock>,
-    ) -> AgentFuture<'_, AgentEventStream<'_>> {
-        panic!("unexpected operation")
-    }
+
     fn interrupt_handle(&self) -> AgentInterruptHandle {
         self.child_handle_reads.fetch_add(1, Ordering::SeqCst);
         AgentInterruptHandle::new()

@@ -28,12 +28,14 @@ pub use pipeline::{
 pub use agent::{
     AGENT_STATE_VERSION, Agent, AgentError, AgentEvent, AgentEventStream, AgentFuture, AgentHook,
     AgentHookError, AgentHookEvent, AgentHookFuture, AgentHookResult, AgentInterruptHandle,
-    AgentResult, AgentState, InMemoryStateStore, PendingToolCalls, PendingToolExecution,
-    ReActAgent, StateKey, StateRecord, StateStore, StateStoreError, StateStoreFuture,
-    StateStoreResult, ToolConfirmation, ToolConfirmationDecision,
+    AgentInterruptToken, AgentResult, AgentState, ContextManagedAgent, InMemoryStateStore,
+    PendingToolCalls, PendingToolExecution, ReActAgent, RecoverableAgent, StateKey, StateRecord,
+    StateStore, StateStoreError, StateStoreFuture, StateStoreResult, StatefulAgent,
+    ToolConfirmation, ToolConfirmationDecision,
 };
 pub use context::{
-    ChatModelSummarizer, ContextPolicy, ContextSummarizer, ContextSummary, FullContext,
+    ChatModelSummarizer, ContextAugmentationError, ContextAugmentationFuture, ContextAugmenter,
+    ContextInput, ContextPolicy, ContextSummarizer, ContextSummary, FullContext,
     HeuristicTokenCounter, OffloadStore, OffloadedTextChunk, RecentTurns, SummaryError,
     SummaryFuture, TokenBudget, TokenBudgetError, TokenCount, TokenCountAccuracy, TokenCounter,
     ToolResultOffload, ZeroContextTurns,

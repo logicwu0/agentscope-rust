@@ -61,7 +61,7 @@ fn approval_stream_is_lazy_and_saves_tools_and_final_reply_before_events() {
     block_on(async {
         let tool = tool();
         let fixture = fixture(tool.clone()).await;
-        let agent: &dyn Agent = &fixture.agent;
+        let agent: &dyn crate::RecoverableAgent = &fixture.agent;
         let unpolled = agent
             .stream_resume_tool_calls(
                 fixture.pending.reply_id().into(),
@@ -206,7 +206,7 @@ fn dropped_execution_stream_retries_with_original_key() {
         let tool = tool();
         let fixture = fixture(tool.clone()).await;
         let pending = leave_execution_pending(&fixture).await;
-        let events = (&fixture.agent as &dyn Agent)
+        let events = (&fixture.agent as &dyn crate::RecoverableAgent)
             .stream_retry_tool_execution(fixture.pending.reply_id().into())
             .await
             .unwrap()
@@ -231,7 +231,7 @@ fn verified_results_stream_without_executing_tools() {
         let tool = tool();
         let fixture = fixture(tool.clone()).await;
         leave_execution_pending(&fixture).await;
-        let agent: &dyn Agent = &fixture.agent;
+        let agent: &dyn crate::RecoverableAgent = &fixture.agent;
         assert!(matches!(
             agent
                 .stream_resolve_tool_execution(fixture.pending.reply_id().into(), vec![])

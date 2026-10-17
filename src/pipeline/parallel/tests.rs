@@ -470,53 +470,15 @@ impl Agent for NameOnlyAgent {
     fn name(&self) -> &str {
         self.0
     }
+
     fn reply(&self, _: Msg) -> AgentFuture<'_, Msg> {
         panic!("unexpected operation")
     }
+
     fn stream(&self, _: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
         panic!("unexpected operation")
     }
-    fn observe(&self, _: Msg) -> AgentFuture<'_, ()> {
-        panic!("unexpected operation")
-    }
-    fn snapshot(&self) -> AgentFuture<'_, AgentState> {
-        panic!("unexpected operation")
-    }
-    fn compact_context(&self, _: usize) -> AgentFuture<'_, Option<ContextSummary>> {
-        panic!("unexpected operation")
-    }
-    fn clear_context_summary(&self) -> AgentFuture<'_, ()> {
-        panic!("unexpected operation")
-    }
-    fn restore(&self, _: AgentState) -> AgentFuture<'_, ()> {
-        panic!("unexpected operation")
-    }
-    fn resume_tool_calls(&self, _: String, _: Vec<ToolConfirmation>) -> AgentFuture<'_, Msg> {
-        panic!("unexpected operation")
-    }
-    fn resolve_tool_execution(&self, _: String, _: Vec<ToolResultBlock>) -> AgentFuture<'_, Msg> {
-        panic!("unexpected operation")
-    }
-    fn retry_tool_execution(&self, _: String) -> AgentFuture<'_, Msg> {
-        panic!("unexpected operation")
-    }
-    fn stream_resume_tool_calls(
-        &self,
-        _: String,
-        _: Vec<ToolConfirmation>,
-    ) -> AgentFuture<'_, AgentEventStream<'_>> {
-        panic!("unexpected operation")
-    }
-    fn stream_retry_tool_execution(&self, _: String) -> AgentFuture<'_, AgentEventStream<'_>> {
-        panic!("unexpected operation")
-    }
-    fn stream_resolve_tool_execution(
-        &self,
-        _: String,
-        _: Vec<ToolResultBlock>,
-    ) -> AgentFuture<'_, AgentEventStream<'_>> {
-        panic!("unexpected operation")
-    }
+
     fn interrupt_handle(&self) -> AgentInterruptHandle {
         panic!("unexpected operation")
     }

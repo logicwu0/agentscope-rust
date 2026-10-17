@@ -177,6 +177,7 @@ impl Agent for ScriptAgent {
     fn name(&self) -> &str {
         self.name
     }
+
     fn stream(&self, input: Msg) -> AgentFuture<'_, AgentEventStream<'_>> {
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
         self.inputs.lock().unwrap().push(input);
@@ -194,6 +195,7 @@ impl Agent for ScriptAgent {
             }) as AgentEventStream<'_>)
         })
     }
+
     fn reply(&self, _: Msg) -> AgentFuture<'_, Msg> {
         self.reply_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
@@ -204,47 +206,7 @@ impl Agent for ScriptAgent {
             Ok(reply(self.name, "plain reply"))
         })
     }
-    fn observe(&self, _: Msg) -> AgentFuture<'_, ()> {
-        panic!("unexpected operation")
-    }
-    fn snapshot(&self) -> AgentFuture<'_, AgentState> {
-        panic!("unexpected operation")
-    }
-    fn compact_context(&self, _: usize) -> AgentFuture<'_, Option<ContextSummary>> {
-        panic!("unexpected operation")
-    }
-    fn clear_context_summary(&self) -> AgentFuture<'_, ()> {
-        panic!("unexpected operation")
-    }
-    fn restore(&self, _: AgentState) -> AgentFuture<'_, ()> {
-        panic!("unexpected operation")
-    }
-    fn resume_tool_calls(&self, _: String, _: Vec<ToolConfirmation>) -> AgentFuture<'_, Msg> {
-        panic!("unexpected operation")
-    }
-    fn resolve_tool_execution(&self, _: String, _: Vec<ToolResultBlock>) -> AgentFuture<'_, Msg> {
-        panic!("unexpected operation")
-    }
-    fn retry_tool_execution(&self, _: String) -> AgentFuture<'_, Msg> {
-        panic!("unexpected operation")
-    }
-    fn stream_resume_tool_calls(
-        &self,
-        _: String,
-        _: Vec<ToolConfirmation>,
-    ) -> AgentFuture<'_, AgentEventStream<'_>> {
-        panic!("unexpected operation")
-    }
-    fn stream_retry_tool_execution(&self, _: String) -> AgentFuture<'_, AgentEventStream<'_>> {
-        panic!("unexpected operation")
-    }
-    fn stream_resolve_tool_execution(
-        &self,
-        _: String,
-        _: Vec<ToolResultBlock>,
-    ) -> AgentFuture<'_, AgentEventStream<'_>> {
-        panic!("unexpected operation")
-    }
+
     fn interrupt_handle(&self) -> AgentInterruptHandle {
         self.child_handle_reads.fetch_add(1, Ordering::SeqCst);
         AgentInterruptHandle::new()

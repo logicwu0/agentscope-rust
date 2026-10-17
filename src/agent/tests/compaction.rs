@@ -49,14 +49,17 @@ fn compaction_is_explicit_persisted_and_used_in_both_reply_paths() {
             let key = StateKey::new("u", "summary").unwrap();
             let agent = agent.with_shared_state_store(key.clone(), store.clone());
             let original = agent.snapshot().await.unwrap();
-            let dynamic: &dyn Agent = &agent;
+            let dynamic: &dyn crate::ContextManagedAgent = &agent;
             let summary = dynamic.compact_context(1).await.unwrap().unwrap();
             assert_eq!(summary.covered_messages(), 3);
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert!(model.recorded_requests().is_empty());
             assert!(dynamic.compact_context(1).await.unwrap().is_none());
             assert_eq!(calls.load(Ordering::SeqCst), 1);
-            let snapshot = dynamic.snapshot().await.unwrap();
+            let snapshot = (&agent as &dyn crate::StatefulAgent)
+                .snapshot()
+                .await
+                .unwrap();
             assert_eq!(snapshot.messages(), original.messages());
             assert_eq!(snapshot.context_summary(), Some(&summary));
             assert_eq!(snapshot.format_version(), 4);

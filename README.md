@@ -59,14 +59,14 @@ completion, final replies, and terminal errors. `ReActAgent::stream` now emits
 those events in real time across the complete model-tool-model loop. Read-only,
 object-safe asynchronous `AgentHook`s can observe reply, observation, model,
 and tool lifecycle boundaries in deterministic registration order.
-`Agent::observe` stores external messages in configured conversation memory
+`StatefulAgent::observe` stores external messages in configured conversation memory
 without triggering a model call. A cloneable `AgentInterruptHandle` provides
 cooperative checkpoints around model calls, streaming chunks, and tool
 execution. Interrupted tool calls are closed with persisted `interrupted`
 results so later conversation state remains structurally valid. Cancellation
 does not roll back external side effects already performed by a tool. A
 versioned, JSON-serializable `AgentState` can now snapshot and atomically
-restore complete conversation history through the object-safe `Agent` API.
+restore complete conversation history through the object-safe `StatefulAgent` API.
 Runtime interruption controls are intentionally excluded from persisted state.
 The object-safe `StateStore` API now keys records by user and session, protects
 writes with optimistic revision checks, and includes a thread-safe
@@ -268,6 +268,55 @@ Dropping during tool execution leaves a checkpoint to reconcile/retry. Dropping
 during subsequent model output retains tool results but discards partial text;
 send a new message to continue from the saved conversation. The original worker
 must be stopped before another process retries or reconciles the same session.
+
+### Agent capabilities and migration
+
+The base `Agent` now requires only `name`, `reply`, `stream`, and
+`interrupt_handle`. All pipelines depend only on this execution contract.
+
+| Interface | Optional capability |
+| --- | --- |
+| `StatefulAgent: Agent` | `observe`, `snapshot`, `restore` |
+| `ContextManagedAgent: Agent` | `compact_context`, `clear_context_summary` |
+| `RecoverableAgent: Agent` | Tool approval, reconciliation, explicit retry, and streaming variants |
+
+`ReActAgent` implements all four traits; inherent method calls are unchanged.
+This is a breaking trait migration: move optional methods out of custom
+`impl Agent` blocks into the corresponding separate trait implementations.
+Consumers must retain the required capability, e.g. `Arc<dyn StatefulAgent>`;
+`dyn Agent` no longer exposes snapshots. There is no automatic capability
+discovery or unsupported-operation placeholder. Snapshots still use `AgentState`,
+not a generic format for arbitrary research algorithm state.
+
+Custom agents can capture an operation-scoped token with `interrupt_handle.token()`
+and honor cancellation using `is_interrupted()` or `cancelled().await`.
+Keep a handle alive while waiting. Prior interrupts do not cancel new tokens.
+See `tests/agent_capabilities.rs` for a minimal implementation exercised through
+sequential, parallel, and routed pipelines.
+
+### Algorithm-supplied context
+
+Implement `ContextAugmenter` and register it with `with_context_augmenter` (or
+`with_shared_context_augmenter`) to retrieve experience or other reference text
+before each actual model step. Providers receive read-only selected messages,
+agent name and step number; they cannot rewrite tools, permissions or history.
+Run `cargo run --example context_augmentation` for an offline example.
+
+Providers run in order against the same unaugmented input, after summary/context
+selection and offload projection. Nonempty results become labeled user-role
+reference messages after the system/summary prefix, before conversation history.
+They are pinned and counted by the token budget; oversized additions fail before
+model invocation. Before-model hooks see the final augmented request. Additions
+do not enter memory or snapshots, but can appear in model requests/hook logs.
+Labels are not a security boundary against prompt injection.
+
+Streaming and recovery use the same path. Retrieval failure stops the model step;
+interruption cancels pending retrieval. Providers must be read-only/cancellation-safe
+and bind session/tenant access themselves. Reattach providers when restoring state;
+recovery retrieves again and may see changed external data. Summary generation and
+automatic-compaction probes do not retrieve context; a later augmented request can
+still exceed budget and fail without another compaction attempt. This extension is
+not a general planner, an algorithm implementation, or a Python service integration.
 
 ### Model-input context policies
 
